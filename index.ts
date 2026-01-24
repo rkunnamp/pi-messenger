@@ -155,11 +155,11 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Add crew status if autonomous mode is active
     let crewStr = "";
-    if (autonomousState.active && autonomousState.epicId) {
+    if (autonomousState.active) {
       const cwd = ctx.cwd ?? process.cwd();
-      const epic = crewStore.getEpic(cwd, autonomousState.epicId);
-      if (epic) {
-        crewStr = theme.fg("accent", ` ⚡${epic.completed_count}/${epic.task_count}`);
+      const plan = crewStore.getPlan(cwd);
+      if (plan) {
+        crewStr = theme.fg("accent", ` ⚡${plan.completed_count}/${plan.task_count}`);
       }
     }
 
@@ -183,21 +183,23 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
   pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
   
-  // Crew: Epics
-  pi_messenger({ action: "epic.create", title: "OAuth" })       → Create epic
-  pi_messenger({ action: "epic.show", id: "c-1-abc" })         → Show epic
-  pi_messenger({ action: "epic.list" })                         → List epics
+  // Crew: Plan from PRD
+  pi_messenger({ action: "plan" })                              → Auto-discover PRD
+  pi_messenger({ action: "plan", prd: "docs/PRD.md" })          → Explicit PRD path
+  
+  // Crew: Work through tasks
+  pi_messenger({ action: "work" })                              → Run ready tasks
+  pi_messenger({ action: "work", autonomous: true })            → Run until done/blocked
   
   // Crew: Tasks
-  pi_messenger({ action: "task.create", title: "Routes", epic: "c-1-abc" })
-  pi_messenger({ action: "task.start", id: "c-1-abc.1" })      → Start task
-  pi_messenger({ action: "task.done", id: "c-1-abc.1", summary: "..." })
-  pi_messenger({ action: "task.ready", epic: "c-1-abc" })      → Ready tasks
+  pi_messenger({ action: "task.show", id: "task-1" })           → Show task
+  pi_messenger({ action: "task.list" })                         → List all tasks
+  pi_messenger({ action: "task.start", id: "task-1" })          → Start task
+  pi_messenger({ action: "task.done", id: "task-1", summary: "..." })
+  pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
-  // Crew: Orchestration
-  pi_messenger({ action: "plan", target: "c-1-abc" })          → Plan epic
-  pi_messenger({ action: "work", target: "c-1-abc", autonomous: true })
-  pi_messenger({ action: "review", target: "c-1-abc.1" })      → Review impl
+  // Crew: Review
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl
 
 Legacy (backwards compatible):
   pi_messenger({ join: true })                   → Join the agent mesh
@@ -210,26 +212,25 @@ Mode: action (if provided) > legacy key-based routing`,
       // ACTION PARAMETER (preferred for new usage)
       // ═══════════════════════════════════════════════════════════════════════
       action: Type.Optional(Type.String({
-        description: "Action to perform (e.g., 'join', 'epic.create', 'task.start', 'work')"
+        description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
       })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // CREW PARAMETERS
       // ═══════════════════════════════════════════════════════════════════════
-      id: Type.Optional(Type.String({ description: "Crew epic or task ID (c-N-xxx or c-N-xxx.M)" })),
+      prd: Type.Optional(Type.String({ description: "PRD file path for plan action" })),
+      id: Type.Optional(Type.String({ description: "Task ID (task-N format)" })),
       taskId: Type.Optional(Type.String({ description: "Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete" })),
-      title: Type.Optional(Type.String({ description: "Title for epic.create, task.create" })),
-      epic: Type.Optional(Type.String({ description: "Parent epic ID for task.create, task.list, task.ready" })),
+      title: Type.Optional(Type.String({ description: "Title for task.create" })),
       dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on (for task.create)" })),
-      target: Type.Optional(Type.String({ description: "Target for plan, work, review, interview, sync" })),
-      idea: Type.Optional(Type.Boolean({ description: "Treat target as idea text, not epic ID" })),
+      target: Type.Optional(Type.String({ description: "Task ID for review action" })),
       summary: Type.Optional(Type.String({ description: "Summary for task.done" })),
       evidence: Type.Optional(Type.Object({
         commits: Type.Optional(Type.Array(Type.String())),
         tests: Type.Optional(Type.Array(Type.String())),
         prs: Type.Optional(Type.Array(Type.String()))
       }, { description: "Evidence for task.done" })),
-      content: Type.Optional(Type.String({ description: "Spec content for epic.set_spec" })),
+      content: Type.Optional(Type.String({ description: "Content for task spec" })),
       type: Type.Optional(Type.Union([
         Type.Literal("plan"),
         Type.Literal("impl")
@@ -518,7 +519,7 @@ Mode: action (if provided) > legacy key-based routing`,
 
   pi.on("agent_end", async (_event, ctx) => {
     // Only continue if autonomous mode is active
-    if (!autonomousState.active || !autonomousState.epicId) return;
+    if (!autonomousState.active) return;
 
     const cwd = autonomousState.cwd ?? ctx.cwd ?? process.cwd();
     const crewDir = join(cwd, ".pi", "messenger", "crew");
@@ -534,18 +535,19 @@ Mode: action (if provided) > legacy key-based routing`,
     }
 
     // Check for ready tasks
-    const readyTasks = crewStore.getReadyTasks(cwd, autonomousState.epicId);
+    const readyTasks = crewStore.getReadyTasks(cwd);
     
     if (readyTasks.length === 0) {
       // No ready tasks - check if all done or blocked
-      const allTasks = crewStore.getTasks(cwd, autonomousState.epicId);
+      const allTasks = crewStore.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
       
       stopAutonomous(allDone ? "completed" : "blocked");
       
+      const plan = crewStore.getPlan(cwd);
       if (ctx.hasUI) {
         if (allDone) {
-          ctx.ui.notify(`✅ All tasks complete in ${autonomousState.epicId}!`, "info");
+          ctx.ui.notify(`✅ All tasks complete for ${plan?.prd ?? "plan"}!`, "info");
         } else {
           const blocked = allTasks.filter(t => t.status === "blocked");
           ctx.ui.notify(`Autonomous stopped: ${blocked.length} task(s) blocked`, "warning");
@@ -555,14 +557,15 @@ Mode: action (if provided) > legacy key-based routing`,
     }
 
     // Continue to next wave
+    // Note: waveNumber was already incremented by addWaveResult() in work.ts
+    const plan = crewStore.getPlan(cwd);
     pi.sendMessage({
       customType: "crew_continue",
-      content: `Continuing autonomous work on ${autonomousState.epicId}. Wave ${autonomousState.waveNumber + 1} with ${readyTasks.length} ready task(s).`,
+      content: `Continuing autonomous work on ${plan?.prd ?? "plan"}. Wave ${autonomousState.waveNumber} with ${readyTasks.length} ready task(s).`,
       display: true
     }, { triggerTurn: true, deliverAs: "steer" });
 
     // The steer message will trigger the LLM to call work again
-    // Optionally, we could inject the command directly, but steer is safer
   });
 
   pi.on("session_shutdown", async () => {

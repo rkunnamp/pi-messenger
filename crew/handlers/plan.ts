@@ -2,8 +2,11 @@
  * Crew - Plan Handler
  * 
  * Orchestrates planning: scouts (parallel) → gap-analyst → create tasks
+ * Simplified: PRD → plan → tasks
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams } from "../types.js";
@@ -14,15 +17,24 @@ import { discoverCrewAgents } from "../utils/discover.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
 
+// Common PRD/spec file patterns to search for
+const PRD_PATTERNS = [
+  "PRD.md", "prd.md",
+  "SPEC.md", "spec.md",
+  "REQUIREMENTS.md", "requirements.md",
+  "DESIGN.md", "design.md",
+  "PLAN.md", "plan.md",
+  "docs/PRD.md", "docs/prd.md",
+  "docs/SPEC.md", "docs/spec.md",
+];
+
 // Scout agents to run in parallel
 const SCOUT_AGENTS = [
   "crew-repo-scout",
   "crew-practice-scout",
   "crew-docs-scout",
+  "crew-web-scout",
   "crew-github-scout",
-  "crew-epic-scout",
-  "crew-docs-gap-scout",
-  "crew-memory-scout",
 ];
 
 export async function execute(
@@ -33,44 +45,46 @@ export async function execute(
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const config = loadCrewConfig(getCrewDir(cwd));
-  const { target, idea } = params;
+  const { prd } = params;
 
-  if (!target) {
-    return result("Error: target required for plan action (epic ID or idea text with idea: true).", {
+  // Check if plan already exists
+  const existingPlan = store.getPlan(cwd);
+  if (existingPlan) {
+    return result(`A plan already exists for ${existingPlan.prd}.\n\nTo create a new plan, first delete the existing one:\n  - Delete .pi/messenger/crew/ directory\n  - Or reset tasks manually`, {
       mode: "plan",
-      error: "missing_target"
+      error: "plan_exists",
+      existingPrd: existingPlan.prd
     });
   }
 
-  // Determine if we're planning an existing epic or a new idea
-  let epicId: string;
-  let epicTitle: string;
-  let featureDescription: string;
+  // Find PRD file
+  let prdPath: string;
+  let prdContent: string;
 
-  if (idea) {
-    // Create new epic from idea
-    const epic = store.createEpic(cwd, target);
-    epicId = epic.id;
-    epicTitle = target;
-    featureDescription = target;
-  } else {
-    // Plan existing epic
-    const epic = store.getEpic(cwd, target);
-    if (!epic) {
-      return result(`Error: Epic ${target} not found. Use idea: true to create from idea text.`, {
+  if (prd) {
+    // Explicit PRD path
+    prdPath = prd;
+    const fullPath = path.isAbsolute(prd) ? prd : path.join(cwd, prd);
+    if (!fs.existsSync(fullPath)) {
+      return result(`PRD file not found: ${prd}`, {
         mode: "plan",
-        error: "epic_not_found",
-        target
+        error: "prd_not_found",
+        prd
       });
     }
-    epicId = epic.id;
-    epicTitle = epic.title;
-    
-    // Get epic spec for description
-    const spec = store.getEpicSpec(cwd, epicId);
-    featureDescription = spec && !spec.includes("*Spec pending*") 
-      ? spec 
-      : epicTitle;
+    prdContent = fs.readFileSync(fullPath, "utf-8");
+  } else {
+    // Auto-discover PRD
+    const discovered = discoverPRD(cwd);
+    if (!discovered) {
+      return result(`No PRD file found. Create one of: ${PRD_PATTERNS.slice(0, 4).join(", ")}\n\nOr specify path: pi_messenger({ action: "plan", prd: "path/to/PRD.md" })`, {
+        mode: "plan",
+        error: "no_prd",
+        searchedPatterns: PRD_PATTERNS
+      });
+    }
+    prdPath = discovered.relativePath;
+    prdContent = discovered.content;
   }
 
   // Discover available scouts
@@ -80,7 +94,7 @@ export async function execute(
   );
 
   if (availableScouts.length === 0) {
-    return result("Error: No scout agents available. Create crew-*-scout.md agents in ~/.pi/agent/agents/", {
+    return result("Error: No scout agents available. Run crew.install or create crew-*-scout.md agents.", {
       mode: "plan",
       error: "no_scouts"
     });
@@ -95,10 +109,19 @@ export async function execute(
     });
   }
 
+  // Create the plan entry
+  store.createPlan(cwd, prdPath);
+
   // Phase 1: Run scouts in parallel
   const scoutTasks = availableScouts.map(agent => ({
     agent,
-    task: `Analyze for feature: "${featureDescription}"\n\nEpic ID: ${epicId}\nEpic Title: ${epicTitle}\n\nProvide context for planning this feature.`
+    task: `Analyze for implementing the following PRD:
+
+## PRD: ${prdPath}
+
+${prdContent}
+
+Provide context for planning this feature implementation.`
   }));
 
   const scoutResults = await spawnAgents(
@@ -120,6 +143,8 @@ export async function execute(
   }
 
   if (scoutFindings.length === 0) {
+    // Clean up the plan entry since planning failed
+    store.deletePlan(cwd);
     return result("Error: All scouts failed. Check agent configurations.", {
       mode: "plan",
       error: "all_scouts_failed",
@@ -132,10 +157,11 @@ export async function execute(
   
   const [analystResult] = await spawnAgents([{
     agent: "crew-gap-analyst",
-    task: `Synthesize scout findings and create task breakdown for epic.
+    task: `Synthesize scout findings and create task breakdown.
 
-Epic ID: ${epicId}
-Epic Title: ${epicTitle}
+## PRD: ${prdPath}
+
+${prdContent}
 
 ## Scout Findings
 
@@ -145,6 +171,8 @@ Create a task breakdown following the exact output format specified in your inst
   }], 1, cwd);
 
   if (analystResult.exitCode !== 0) {
+    // Clean up the plan entry since planning failed
+    store.deletePlan(cwd);
     return result(`Error: Gap analyst failed: ${analystResult.error ?? "Unknown error"}`, {
       mode: "plan",
       error: "analyst_failed",
@@ -156,12 +184,12 @@ Create a task breakdown following the exact output format specified in your inst
   const tasks = parseTasksFromOutput(analystResult.output);
 
   if (tasks.length === 0) {
-    // Store the analysis as epic spec even if no tasks parsed
-    store.setEpicSpec(cwd, epicId, analystResult.output);
+    // Store the analysis as plan spec even if no tasks parsed
+    store.setPlanSpec(cwd, analystResult.output);
     
-    return result(`Plan analysis complete but no tasks could be parsed.\n\nAnalysis saved to epic spec. Review and create tasks manually.`, {
+    return result(`Plan analysis complete but no tasks could be parsed.\n\nAnalysis saved to plan.md. Review and create tasks manually.`, {
       mode: "plan",
-      epicId,
+      prd: prdPath,
       analysisLength: analystResult.output.length,
       scoutsRun: scoutFindings.length,
       failedScouts
@@ -175,11 +203,12 @@ Create a task breakdown following the exact output format specified in your inst
   // First pass: create tasks without dependencies
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
-    const created = store.createTask(cwd, epicId, task.title, task.description);
+    const created = store.createTask(cwd, task.title, task.description);
     createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn });
     titleToId.set(task.title.toLowerCase(), created.id);
     // Also map "task N" format
     titleToId.set(`task ${i + 1}`, created.id);
+    titleToId.set(`task-${i + 1}`, created.id);
   }
 
   // Second pass: resolve and update dependencies
@@ -198,17 +227,17 @@ Create a task breakdown following the exact output format specified in your inst
     }
   }
 
-  // Update epic spec with full analysis
-  store.setEpicSpec(cwd, epicId, analystResult.output);
-  store.updateEpic(cwd, epicId, { status: "active" });
+  // Update plan spec with full analysis
+  store.setPlanSpec(cwd, analystResult.output);
 
   // Build result text
   const taskList = createdTasks.map(t => {
-    const deps = t.dependsOn.length > 0 ? ` (deps: ${t.dependsOn.join(", ")})` : "";
+    const task = store.getTask(cwd, t.id);
+    const deps = task?.depends_on.length ? ` → deps: ${task.depends_on.join(", ")}` : "";
     return `  - ${t.id}: ${t.title}${deps}`;
   }).join("\n");
 
-  const text = `✅ Planning complete for **${epicId}**: ${epicTitle}
+  const text = `✅ Plan created from **${prdPath}**
 
 **Scouts run:** ${scoutFindings.length}/${availableScouts.length}
 ${failedScouts.length > 0 ? `**Failed scouts:** ${failedScouts.join(", ")}\n` : ""}
@@ -217,13 +246,13 @@ ${failedScouts.length > 0 ? `**Failed scouts:** ${failedScouts.join(", ")}\n` : 
 ${taskList}
 
 **Next steps:**
-- Review tasks: \`pi_messenger({ action: "epic.show", id: "${epicId}" })\`
-- Start work: \`pi_messenger({ action: "work", target: "${epicId}" })\``;
+- Review tasks: \`pi_messenger({ action: "task.list" })\`
+- Start work: \`pi_messenger({ action: "work" })\`
+- Autonomous: \`pi_messenger({ action: "work", autonomous: true })\``;
 
   return result(text, {
     mode: "plan",
-    epicId,
-    epicTitle,
+    prd: prdPath,
     scoutsRun: scoutFindings.length,
     failedScouts,
     tasksCreated: createdTasks.map(t => ({ id: t.id, title: t.title }))
@@ -266,7 +295,7 @@ function parseTasksFromOutput(output: string): ParsedTask[] {
     if (depsMatch) {
       const depsText = depsMatch[1].trim().toLowerCase();
       if (depsText !== "none" && depsText !== "n/a" && depsText !== "-") {
-        // Parse "Task 1, Task 2" or "Task 1" format
+        // Parse "Task 1, Task 2" or "task-1, task-2" format
         dependsOn = depsText
           .split(/,\s*/)
           .map(d => d.trim())
@@ -283,4 +312,47 @@ function parseTasksFromOutput(output: string): ParsedTask[] {
   }
 
   return tasks;
+}
+
+// =============================================================================
+// PRD Discovery
+// =============================================================================
+
+interface DiscoveredPRD {
+  relativePath: string;
+  content: string;
+}
+
+const MAX_PRD_SIZE = 100000; // 100KB max
+
+/**
+ * Discovers PRD file from the project.
+ */
+function discoverPRD(cwd: string): DiscoveredPRD | null {
+  const seenPaths = new Set<string>();
+
+  for (const pattern of PRD_PATTERNS) {
+    const filePath = path.join(cwd, pattern);
+    if (fs.existsSync(filePath)) {
+      try {
+        // Use realpath to handle case-insensitive filesystems
+        const realPath = fs.realpathSync(filePath);
+        if (seenPaths.has(realPath)) continue;
+        seenPaths.add(realPath);
+        
+        let content = fs.readFileSync(filePath, "utf-8");
+        
+        // Truncate if too large
+        if (content.length > MAX_PRD_SIZE) {
+          content = content.slice(0, MAX_PRD_SIZE) + "\n\n[Content truncated]";
+        }
+        
+        return { relativePath: pattern, content };
+      } catch {
+        // Ignore read errors
+      }
+    }
+  }
+
+  return null;
 }

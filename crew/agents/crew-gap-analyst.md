@@ -2,7 +2,7 @@
 name: crew-gap-analyst
 description: Synthesizes scout findings into a comprehensive plan with tasks
 tools: read
-model: claude-sonnet-4-20250514
+model: claude-opus-4-5
 crewRole: analyst
 maxOutput: { bytes: 102400, lines: 2000 }
 parallel: false

@@ -15,7 +15,6 @@ export interface WaveResult {
 
 export interface AutonomousState {
   active: boolean;
-  epicId: string | null;
   cwd: string | null;
   waveNumber: number;
   attemptsPerTask: Record<string, number>;
@@ -32,7 +31,6 @@ export interface AutonomousState {
  */
 export const autonomousState: AutonomousState = {
   active: false,
-  epicId: null,
   cwd: null,
   waveNumber: 0,
   attemptsPerTask: {},
@@ -47,7 +45,6 @@ export const autonomousState: AutonomousState = {
  */
 export function resetAutonomousState(): void {
   autonomousState.active = false;
-  autonomousState.epicId = null;
   autonomousState.cwd = null;
   autonomousState.waveNumber = 0;
   autonomousState.attemptsPerTask = {};
@@ -58,11 +55,10 @@ export function resetAutonomousState(): void {
 }
 
 /**
- * Start autonomous mode for an epic.
+ * Start autonomous mode.
  */
-export function startAutonomous(epicId: string, cwd: string): void {
+export function startAutonomous(cwd: string): void {
   autonomousState.active = true;
-  autonomousState.epicId = epicId;
   autonomousState.cwd = cwd;
   autonomousState.waveNumber = 1;
   autonomousState.attemptsPerTask = {};
@@ -94,7 +90,6 @@ export function addWaveResult(result: WaveResult): void {
  */
 export function restoreAutonomousState(data: Partial<AutonomousState>): void {
   if (data.active !== undefined) autonomousState.active = data.active;
-  if (data.epicId !== undefined) autonomousState.epicId = data.epicId;
   if (data.cwd !== undefined) autonomousState.cwd = data.cwd;
   if (data.waveNumber !== undefined) autonomousState.waveNumber = data.waveNumber;
   if (data.attemptsPerTask !== undefined) autonomousState.attemptsPerTask = data.attemptsPerTask;

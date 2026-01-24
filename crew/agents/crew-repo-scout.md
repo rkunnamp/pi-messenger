@@ -2,7 +2,7 @@
 name: crew-repo-scout
 description: Analyzes codebase structure, patterns, and relevant code for a feature
 tools: read, bash, grep, find
-model: claude-sonnet-4-20250514
+model: claude-opus-4-5
 crewRole: scout
 maxOutput: { bytes: 51200, lines: 500 }
 parallel: true

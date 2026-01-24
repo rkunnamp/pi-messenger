@@ -2,6 +2,7 @@
  * Crew - Sync Handler
  * 
  * Updates downstream specs after task completion.
+ * Works with current plan's tasks.
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -25,6 +26,15 @@ export async function execute(
     return result("Error: target (completed task ID) required for sync action.", {
       mode: "sync",
       error: "missing_target"
+    });
+  }
+
+  // Verify plan exists
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("Error: No plan found.", {
+      mode: "sync",
+      error: "no_plan"
     });
   }
 
@@ -56,16 +66,7 @@ export async function execute(
     });
   }
 
-  // Get epic and all tasks
-  const epic = store.getEpic(cwd, task.epic_id);
-  if (!epic) {
-    return result(`Error: Epic ${task.epic_id} not found.`, {
-      mode: "sync",
-      error: "epic_not_found"
-    });
-  }
-
-  const allTasks = store.getTasks(cwd, task.epic_id);
+  const allTasks = store.getTasks(cwd);
   
   // Find dependent tasks (tasks that depend on the completed task)
   const dependentTasks = allTasks.filter(t => 
@@ -162,6 +163,7 @@ ${update.newContent}`;
     }
   }
 
+  const readyTasks = store.getReadyTasks(cwd);
   const text = `# Sync Complete: ${target}
 
 **Dependent tasks checked:** ${dependentTasks.length}
@@ -169,7 +171,7 @@ ${update.newContent}`;
 
 ${updates.length > 0 ? `## Updates\n${updates.map(u => `- **${u.taskId}**: ${u.reason}`).join("\n")}` : "## No Updates Needed\n\nDependent task specs are already up to date."}
 
-${updatedCount > 0 ? `\n**Ready tasks:** ${store.getReadyTasks(cwd, task.epic_id).map(t => t.id).join(", ") || "none"}` : ""}`;
+${updatedCount > 0 ? `\n**Ready tasks:** ${readyTasks.map(t => t.id).join(", ") || "none"}` : ""}`;
 
   return result(text, {
     mode: "sync",

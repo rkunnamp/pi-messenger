@@ -1,15 +1,15 @@
 /**
- * Crew Overlay - Epic/Task Visualization
+ * Crew Overlay - Task Visualization
  * 
  * Renders the Crew tab content for the messenger overlay.
- * Shows epic/task tree with status, dependencies, and autonomous mode info.
+ * Shows flat task list under PRD name with status and dependencies.
  */
 
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import * as crewStore from "./crew/store.js";
 import { autonomousState } from "./crew/state.js";
-import type { Epic, Task } from "./crew/types.js";
+import type { Task } from "./crew/types.js";
 
 // Status icons
 const STATUS_ICONS: Record<string, string> = {
@@ -19,31 +19,20 @@ const STATUS_ICONS: Record<string, string> = {
   blocked: "✗",
 };
 
-// Epic status icons
-const EPIC_STATUS_ICONS: Record<string, string> = {
-  planning: "📝",
-  active: "🚀",
-  blocked: "🚫",
-  completed: "✅",
-  archived: "📦",
-};
-
 export interface CrewViewState {
-  selectedEpicIndex: number;
   scrollOffset: number;
-  expandedEpics: Set<string>;
+  selectedTaskIndex: number;
 }
 
 export function createCrewViewState(): CrewViewState {
   return {
-    selectedEpicIndex: 0,
     scrollOffset: 0,
-    expandedEpics: new Set(),
+    selectedTaskIndex: 0,
   };
 }
 
 /**
- * Render the crew overview content.
+ * Render the crew overview content - flat task list under PRD.
  */
 export function renderCrewContent(
   theme: Theme,
@@ -53,37 +42,33 @@ export function renderCrewContent(
   viewState: CrewViewState
 ): string[] {
   const lines: string[] = [];
-  const epics = crewStore.listEpics(cwd);
+  const plan = crewStore.getPlan(cwd);
 
-  if (epics.length === 0) {
+  if (!plan) {
     return renderEmptyState(theme, width, height);
   }
 
-  // Render epic list with tasks
-  for (let i = 0; i < epics.length; i++) {
-    const epic = epics[i];
-    const isExpanded = viewState.expandedEpics.has(epic.id);
-    const isSelected = i === viewState.selectedEpicIndex;
-    
-    // Epic header line
-    const epicLine = renderEpicLine(theme, epic, isExpanded, isSelected, width);
-    lines.push(epicLine);
+  const tasks = crewStore.getTasks(cwd);
+  
+  // Header: PRD with progress
+  const pct = plan.task_count > 0 ? Math.round((plan.completed_count / plan.task_count) * 100) : 0;
+  const progressText = `[${plan.completed_count}/${plan.task_count}]`;
+  const prdLine = `📋 ${plan.prd}`;
+  const prdWidth = visibleWidth(prdLine);
+  const progressWidth = visibleWidth(progressText);
+  const padding = Math.max(1, width - prdWidth - progressWidth - 2);
+  
+  lines.push(prdLine + " ".repeat(padding) + theme.fg("accent", progressText));
+  lines.push("");
 
-    // Task list if expanded
-    if (isExpanded) {
-      const tasks = crewStore.getTasks(cwd, epic.id);
-      for (let j = 0; j < tasks.length; j++) {
-        const task = tasks[j];
-        const isLast = j === tasks.length - 1;
-        const taskLine = renderTaskLine(theme, task, isLast, width);
-        lines.push(taskLine);
-      }
-      
-      if (tasks.length === 0) {
-        lines.push(theme.fg("dim", "   (no tasks yet)"));
-      }
-      
-      lines.push(""); // Spacer after tasks
+  // Task list
+  if (tasks.length === 0) {
+    lines.push(theme.fg("dim", "  (no tasks yet)"));
+  } else {
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i];
+      const taskLine = renderTaskLine(theme, task, i === viewState.selectedTaskIndex, width);
+      lines.push(taskLine);
     }
   }
 
@@ -109,26 +94,25 @@ export function renderCrewContent(
  * Render the status bar for autonomous mode.
  */
 export function renderCrewStatusBar(theme: Theme, cwd: string, width: number): string {
-  if (!autonomousState.active || !autonomousState.epicId) {
-    // Check for any active epics
-    const epics = crewStore.listEpics(cwd);
-    const activeEpics = epics.filter(e => e.status === "active");
-    
-    if (activeEpics.length > 0) {
-      const e = activeEpics[0];
-      const progress = `${e.completed_count}/${e.task_count}`;
-      return truncateToWidth(
-        `${EPIC_STATUS_ICONS.active} ${e.id}: ${progress} tasks`,
-        width
-      );
-    }
-    
-    return theme.fg("dim", "No active work");
+  const plan = crewStore.getPlan(cwd);
+  
+  if (!plan) {
+    return theme.fg("dim", "No active plan");
+  }
+
+  if (!autonomousState.active) {
+    // Show plan progress
+    const progress = `${plan.completed_count}/${plan.task_count}`;
+    const ready = crewStore.getReadyTasks(cwd);
+    const readyText = ready.length > 0 ? ` │ ${ready.length} ready` : "";
+    return truncateToWidth(
+      `📋 ${plan.prd}: ${progress} tasks${readyText}`,
+      width
+    );
   }
 
   // Autonomous mode active
-  const epic = crewStore.getEpic(cwd, autonomousState.epicId);
-  const progress = epic ? `${epic.completed_count}/${epic.task_count}` : "?/?";
+  const progress = `${plan.completed_count}/${plan.task_count}`;
   
   // Calculate elapsed time
   let elapsed = "";
@@ -140,7 +124,7 @@ export function renderCrewStatusBar(theme: Theme, cwd: string, width: number): s
     elapsed = `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
 
-  const readyTasks = crewStore.getReadyTasks(cwd, autonomousState.epicId);
+  const readyTasks = crewStore.getReadyTasks(cwd);
   
   const parts = [
     `Wave ${autonomousState.waveNumber}`,
@@ -164,8 +148,8 @@ export function renderCrewStatusBar(theme: Theme, cwd: string, width: number): s
 
 function renderEmptyState(theme: Theme, width: number, height: number): string[] {
   const lines: string[] = [];
-  const msg = "No epics yet";
-  const hint = "Use pi_messenger({ action: \"epic.create\", title: \"...\" })";
+  const msg = "No active plan";
+  const hint = "Use pi_messenger({ action: \"plan\" })";
   
   const padTop = Math.floor((height - 3) / 2);
   for (let i = 0; i < padTop; i++) lines.push("");
@@ -180,40 +164,14 @@ function renderEmptyState(theme: Theme, width: number, height: number): string[]
   return lines;
 }
 
-function renderEpicLine(
-  theme: Theme,
-  epic: Epic,
-  isExpanded: boolean,
-  isSelected: boolean,
-  width: number
-): string {
-  const icon = EPIC_STATUS_ICONS[epic.status] ?? "?";
-  const expandIcon = isExpanded ? "▾" : "▸";
-  const selectIndicator = isSelected ? theme.fg("accent", "▸ ") : "  ";
-  
-  const progress = `${epic.completed_count}/${epic.task_count}`;
-  const progressColor = epic.completed_count === epic.task_count && epic.task_count > 0
-    ? "accent"
-    : "dim";
-  
-  const line = `${selectIndicator}${expandIcon} ${icon} ${epic.id}: ${epic.title}`;
-  const progressText = ` [${progress}]`;
-  
-  const availableWidth = width - visibleWidth(progressText) - 1;
-  const truncatedLine = truncateToWidth(line, availableWidth);
-  const padding = " ".repeat(Math.max(0, availableWidth - visibleWidth(truncatedLine)));
-  
-  return truncatedLine + padding + theme.fg(progressColor, progressText);
-}
-
 function renderTaskLine(
   theme: Theme,
   task: Task,
-  isLast: boolean,
+  isSelected: boolean,
   width: number
 ): string {
-  const connector = isLast ? "└─" : "├─";
   const icon = STATUS_ICONS[task.status] ?? "?";
+  const selectIndicator = isSelected ? theme.fg("accent", "▸ ") : "  ";
   
   // Color the icon based on status
   let coloredIcon: string;
@@ -236,19 +194,14 @@ function renderTaskLine(
   if (task.status === "in_progress" && task.assigned_to) {
     suffix = ` (${task.assigned_to})`;
   } else if (task.status === "todo" && task.depends_on.length > 0) {
-    // Show only task numbers (e.g., "deps: 2, 3" instead of full IDs)
-    const depNums = task.depends_on.map(id => {
-      const parts = id.split(".");
-      return parts[parts.length - 1];
-    });
-    suffix = ` → deps: ${depNums.join(", ")}`;
+    suffix = ` → deps: ${task.depends_on.join(", ")}`;
   } else if (task.status === "blocked" && task.blocked_reason) {
     // Truncate block reason
     const reason = task.blocked_reason.slice(0, 20);
     suffix = ` [${reason}${task.blocked_reason.length > 20 ? "…" : ""}]`;
   }
 
-  const line = `   ${connector} ${coloredIcon} ${task.id}  ${task.title}`;
+  const line = `${selectIndicator}${coloredIcon} ${task.id}  ${task.title}`;
   const fullLine = line + theme.fg("dim", suffix);
   
   return truncateToWidth(fullLine, width);
@@ -267,34 +220,40 @@ function renderLegend(theme: Theme, width: number): string {
 }
 
 /**
- * Toggle expansion of an epic.
+ * Navigate to next/prev task.
  */
-export function toggleEpicExpansion(viewState: CrewViewState, epicId: string): void {
-  if (viewState.expandedEpics.has(epicId)) {
-    viewState.expandedEpics.delete(epicId);
-  } else {
-    viewState.expandedEpics.add(epicId);
-  }
-}
-
-/**
- * Navigate to next/prev epic.
- */
-export function navigateEpic(viewState: CrewViewState, direction: 1 | -1, epicCount: number): void {
-  if (epicCount === 0) return;
-  viewState.selectedEpicIndex = Math.max(
+export function navigateTask(viewState: CrewViewState, direction: 1 | -1, taskCount: number): void {
+  if (taskCount === 0) return;
+  viewState.selectedTaskIndex = Math.max(
     0,
-    Math.min(epicCount - 1, viewState.selectedEpicIndex + direction)
+    Math.min(taskCount - 1, viewState.selectedTaskIndex + direction)
   );
 }
 
 /**
- * Get the currently selected epic ID.
+ * Get the currently selected task ID.
  */
-export function getSelectedEpicId(cwd: string, viewState: CrewViewState): string | null {
-  const epics = crewStore.listEpics(cwd);
-  if (viewState.selectedEpicIndex >= 0 && viewState.selectedEpicIndex < epics.length) {
-    return epics[viewState.selectedEpicIndex].id;
+export function getSelectedTaskId(cwd: string, viewState: CrewViewState): string | null {
+  const tasks = crewStore.getTasks(cwd);
+  if (viewState.selectedTaskIndex >= 0 && viewState.selectedTaskIndex < tasks.length) {
+    return tasks[viewState.selectedTaskIndex].id;
   }
+  return null;
+}
+
+// Legacy exports for compatibility (no-ops now that epics are removed)
+export function toggleEpicExpansion(_viewState: CrewViewState, _epicId: string): void {
+  // No-op - epics removed
+}
+
+export function navigateEpic(viewState: CrewViewState, direction: 1 | -1, _epicCount: number): void {
+  // Redirect to task navigation
+  const cwd = process.cwd();
+  const tasks = crewStore.getTasks(cwd);
+  navigateTask(viewState, direction, tasks.length);
+}
+
+export function getSelectedEpicId(_cwd: string, _viewState: CrewViewState): string | null {
+  // No-op - epics removed
   return null;
 }

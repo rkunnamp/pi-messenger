@@ -2,6 +2,7 @@
  * Crew - Review Handler
  * 
  * Spawns reviewer with git diff context for task or plan review.
+ * Simplified: works with current plan
  */
 
 import { execSync } from "node:child_process";
@@ -23,7 +24,7 @@ export async function execute(
   const { target, type } = params;
 
   if (!target) {
-    return result("Error: target (task ID or epic ID) required for review action.", {
+    return result("Error: target (task ID) required for review action.\n\nUsage: pi_messenger({ action: \"review\", target: \"task-1\" })", {
       mode: "review",
       error: "missing_target"
     });
@@ -39,14 +40,13 @@ export async function execute(
     });
   }
 
-  // Determine review type from target
-  const isTaskId = target.includes(".");
-  const reviewType = type ?? (isTaskId ? "impl" : "plan");
+  // Determine review type: "impl" for task, "plan" for plan review
+  const reviewType = type ?? (target.startsWith("task-") ? "impl" : "plan");
 
   if (reviewType === "impl") {
     return reviewImplementation(cwd, target);
   } else {
-    return reviewPlan(cwd, target);
+    return reviewPlan(cwd);
   }
 }
 
@@ -84,9 +84,9 @@ async function reviewImplementation(cwd: string, taskId: string) {
   const diff = getGitDiff(baseCommit, cwd);
   const commitLog = getCommitLog(baseCommit, cwd);
 
-  // Get task and epic specs for context
+  // Get task spec for context
   const taskSpec = store.getTaskSpec(cwd, taskId) ?? "";
-  const epic = store.getEpic(cwd, task.epic_id);
+  const plan = store.getPlan(cwd);
 
   // Build review prompt
   const prompt = `# Code Review Request
@@ -95,7 +95,7 @@ async function reviewImplementation(cwd: string, taskId: string) {
 
 **Task ID:** ${taskId}
 **Task Title:** ${task.title}
-**Epic:** ${task.epic_id} - ${epic?.title ?? "Unknown"}
+**PRD:** ${plan?.prd ?? "Unknown"}
 
 ## Task Specification
 
@@ -132,6 +132,17 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
   // Parse verdict from output
   const verdict = parseVerdict(reviewResult.output);
 
+  // Store review feedback in task for retry context
+  store.updateTask(cwd, taskId, {
+    last_review: {
+      verdict: verdict.verdict,
+      summary: verdict.summary,
+      issues: verdict.issues,
+      suggestions: verdict.suggestions,
+      reviewed_at: new Date().toISOString()
+    }
+  });
+
   const text = `# Review: ${taskId}
 
 **Verdict:** ${verdict.verdict}
@@ -158,18 +169,17 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
 // Plan Review
 // =============================================================================
 
-async function reviewPlan(cwd: string, epicId: string) {
-  const epic = store.getEpic(cwd, epicId);
-  if (!epic) {
-    return result(`Error: Epic ${epicId} not found.`, {
+async function reviewPlan(cwd: string) {
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("Error: No plan found.", {
       mode: "review",
-      error: "epic_not_found",
-      target: epicId
+      error: "no_plan"
     });
   }
 
-  const epicSpec = store.getEpicSpec(cwd, epicId);
-  const tasks = store.getTasks(cwd, epicId);
+  const planSpec = store.getPlanSpec(cwd);
+  const tasks = store.getTasks(cwd);
 
   // Build task overview
   const taskOverview = tasks.map(t => {
@@ -184,16 +194,15 @@ async function reviewPlan(cwd: string, epicId: string) {
   // Build review prompt
   const prompt = `# Plan Review Request
 
-## Epic Information
+## Plan Information
 
-**Epic ID:** ${epicId}
-**Epic Title:** ${epic.title}
-**Status:** ${epic.status}
+**PRD:** ${plan.prd}
 **Tasks:** ${tasks.length}
+**Progress:** ${plan.completed_count}/${plan.task_count}
 
-## Epic Specification
+## Plan Specification
 
-${epicSpec || "*No spec available*"}
+${planSpec || "*No spec available*"}
 
 ## Task Breakdown
 
@@ -226,8 +235,9 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
   // Parse verdict
   const verdict = parseVerdict(reviewResult.output);
 
-  const text = `# Plan Review: ${epicId}
+  const text = `# Plan Review
 
+**PRD:** ${plan.prd}
 **Verdict:** ${verdict.verdict}
 
 ${verdict.summary}
@@ -241,7 +251,7 @@ ${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verd
   return result(text, {
     mode: "review",
     type: "plan",
-    epicId,
+    prd: plan.prd,
     verdict: verdict.verdict,
     issueCount: verdict.issues.length,
     suggestionCount: verdict.suggestions.length
@@ -280,15 +290,15 @@ function getCommitLog(baseCommit: string, cwd: string): string {
   }
 }
 
-interface ReviewVerdict {
+interface ParsedReview {
   verdict: "SHIP" | "NEEDS_WORK" | "MAJOR_RETHINK";
   summary: string;
   issues: string[];
   suggestions: string[];
 }
 
-function parseVerdict(output: string): ReviewVerdict {
-  const result: ReviewVerdict = {
+function parseVerdict(output: string): ParsedReview {
+  const result: ParsedReview = {
     verdict: "NEEDS_WORK",
     summary: "",
     issues: [],
@@ -298,7 +308,7 @@ function parseVerdict(output: string): ReviewVerdict {
   // Extract verdict
   const verdictMatch = output.match(/##\s*Verdict:\s*(SHIP|NEEDS_WORK|MAJOR_RETHINK)/i);
   if (verdictMatch) {
-    result.verdict = verdictMatch[1].toUpperCase() as ReviewVerdict["verdict"];
+    result.verdict = verdictMatch[1].toUpperCase() as ParsedReview["verdict"];
   }
 
   // Extract summary (text between Verdict and next ##)

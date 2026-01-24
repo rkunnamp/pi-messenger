@@ -2,6 +2,7 @@
  * Crew - Action Router
  * 
  * Routes crew actions to their respective handlers.
+ * Simplified: PRD → plan → tasks → work → done
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -11,16 +12,13 @@ import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
 import { ensureAgentsInstalled } from "./utils/install.js";
 
-// Handlers will be implemented in Phase 2-4
-// For now, we import them conditionally when they exist
-
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
 
 /**
  * Execute a crew action.
  * 
- * Routes action strings like "epic.create" to the appropriate handler.
+ * Routes action strings like "task.show" to the appropriate handler.
  */
 export async function executeCrewAction(
   action: string,
@@ -32,7 +30,7 @@ export async function executeCrewAction(
   updateStatus: UpdateStatusFn,
   appendEntry: AppendEntryFn
 ) {
-  // Parse action: "epic.create" → group="epic", op="create"
+  // Parse action: "task.show" → group="task", op="show"
   const dotIndex = action.indexOf('.');
   const group = dotIndex > 0 ? action.slice(0, dotIndex) : action;
   const op = dotIndex > 0 ? action.slice(dotIndex + 1) : null;
@@ -66,8 +64,16 @@ export async function executeCrewAction(
     // ═══════════════════════════════════════════════════════════════════════
     // Coordination actions (delegate to existing handlers)
     // ═══════════════════════════════════════════════════════════════════════
-    case 'status':
-      return handlers.executeStatus(state, dirs);
+    case 'status': {
+      // Check if this is a crew status request
+      try {
+        const statusHandler = await import("./handlers/status.js");
+        return statusHandler.execute(params, state, dirs, ctx);
+      } catch {
+        // Fall back to messenger status
+        return handlers.executeStatus(state, dirs);
+      }
+    }
 
     case 'list':
       return handlers.executeList(state, dirs);
@@ -121,34 +127,19 @@ export async function executeCrewAction(
       return handlers.executeComplete(state, dirs, params.taskId, params.notes, params.spec);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Crew actions (Phase 2-4 handlers)
+    // Crew actions - Simplified PRD-based workflow
     // ═══════════════════════════════════════════════════════════════════════
-    case 'epic': {
-      if (!op) {
-        return result("Error: epic action requires operation (e.g., 'epic.create').",
-          { mode: "epic", error: "missing_operation" });
-      }
-      // Dynamic import to avoid errors until handlers are created
-      try {
-        const epicHandlers = await import("./handlers/epic.js");
-        return epicHandlers.execute(op, params, state, dirs, ctx);
-      } catch {
-        return result(`Error: epic.${op} handler not yet implemented.`,
-          { mode: "epic", error: "not_implemented", operation: op });
-      }
-    }
-
     case 'task': {
       if (!op) {
-        return result("Error: task action requires operation (e.g., 'task.start').",
+        return result("Error: task action requires operation (e.g., 'task.show', 'task.list').",
           { mode: "task", error: "missing_operation" });
       }
       try {
         const taskHandlers = await import("./handlers/task.js");
         return taskHandlers.execute(op, params, state, dirs, ctx);
-      } catch {
-        return result(`Error: task.${op} handler not yet implemented.`,
-          { mode: "task", error: "not_implemented", operation: op });
+      } catch (e) {
+        return result(`Error: task.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "task", error: "handler_error", operation: op });
       }
     }
 
@@ -158,9 +149,9 @@ export async function executeCrewAction(
       try {
         const planHandler = await import("./handlers/plan.js");
         return planHandler.execute(params, state, dirs, ctx);
-      } catch {
-        return result("Error: plan handler not yet implemented.",
-          { mode: "plan", error: "not_implemented" });
+      } catch (e) {
+        return result(`Error: plan handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "plan", error: "handler_error" });
       }
     }
 
@@ -170,9 +161,9 @@ export async function executeCrewAction(
       try {
         const workHandler = await import("./handlers/work.js");
         return workHandler.execute(params, state, dirs, ctx, appendEntry);
-      } catch {
-        return result("Error: work handler not yet implemented.",
-          { mode: "work", error: "not_implemented" });
+      } catch (e) {
+        return result(`Error: work handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "work", error: "handler_error" });
       }
     }
 
@@ -182,57 +173,47 @@ export async function executeCrewAction(
       try {
         const reviewHandler = await import("./handlers/review.js");
         return reviewHandler.execute(params, state, dirs, ctx);
-      } catch {
-        return result("Error: review handler not yet implemented.",
-          { mode: "review", error: "not_implemented" });
+      } catch (e) {
+        return result(`Error: review handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "review", error: "handler_error" });
       }
     }
 
     case 'interview': {
+      // Auto-install agents if missing
+      ensureAgentsInstalled();
       try {
         const interviewHandler = await import("./handlers/interview.js");
         return interviewHandler.execute(params, state, dirs, ctx);
-      } catch {
-        return result("Error: interview handler not yet implemented.",
-          { mode: "interview", error: "not_implemented" });
+      } catch (e) {
+        return result(`Error: interview handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "interview", error: "handler_error" });
       }
     }
 
     case 'sync': {
+      // Auto-install agents if missing
+      ensureAgentsInstalled();
       try {
         const syncHandler = await import("./handlers/sync.js");
         return syncHandler.execute(params, state, dirs, ctx);
-      } catch {
-        return result("Error: sync handler not yet implemented.",
-          { mode: "sync", error: "not_implemented" });
+      } catch (e) {
+        return result(`Error: sync handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "sync", error: "handler_error" });
       }
     }
 
     case 'crew': {
       if (!op) {
-        return result("Error: crew action requires operation (e.g., 'crew.status').",
+        return result("Error: crew action requires operation (e.g., 'crew.status', 'crew.agents').",
           { mode: "crew", error: "missing_operation" });
       }
       try {
         const statusHandlers = await import("./handlers/status.js");
-        return statusHandlers.execute(op, params, state, dirs, ctx);
-      } catch {
-        return result(`Error: crew.${op} handler not yet implemented.`,
-          { mode: "crew", error: "not_implemented", operation: op });
-      }
-    }
-
-    case 'checkpoint': {
-      if (!op) {
-        return result("Error: checkpoint action requires operation (e.g., 'checkpoint.save').",
-          { mode: "checkpoint", error: "missing_operation" });
-      }
-      try {
-        const checkpointHandlers = await import("./handlers/checkpoint.js");
-        return checkpointHandlers.execute(op, params, state, dirs, ctx);
-      } catch {
-        return result(`Error: checkpoint.${op} handler not yet implemented.`,
-          { mode: "checkpoint", error: "not_implemented", operation: op });
+        return statusHandlers.executeCrew(op, params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: crew.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "crew", error: "handler_error", operation: op });
       }
     }
 

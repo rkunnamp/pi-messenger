@@ -21,18 +21,20 @@ const TARGET_AGENTS_DIR = path.join(homedir(), ".pi", "agent", "agents");
 
 // List of crew agents to install
 const CREW_AGENTS = [
-  "crew-worker.md",
-  "crew-reviewer.md",
+  // Scouts (5)
   "crew-repo-scout.md",
   "crew-practice-scout.md",
   "crew-docs-scout.md",
+  "crew-web-scout.md",
   "crew-github-scout.md",
-  "crew-epic-scout.md",
-  "crew-docs-gap-scout.md",
-  "crew-memory-scout.md",
+  // Analysts (3)
   "crew-gap-analyst.md",
   "crew-interview-generator.md",
   "crew-plan-sync.md",
+  // Worker (1)
+  "crew-worker.md",
+  // Reviewer (1)
+  "crew-reviewer.md",
 ];
 
 export interface InstallResult {

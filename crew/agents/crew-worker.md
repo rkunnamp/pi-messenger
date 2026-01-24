@@ -2,7 +2,7 @@
 name: crew-worker
 description: Implements a single crew task with mesh coordination
 tools: read, write, edit, bash, pi_messenger
-model: claude-sonnet-4-20250514
+model: claude-opus-4-5
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
 parallel: true
@@ -11,7 +11,7 @@ retryable: true
 
 # Crew Worker
 
-You implement a single task. Your prompt contains TASK_ID and EPIC_ID.
+You implement a single task. Your prompt contains TASK_ID.
 
 ## Phase 1: Join Mesh (FIRST)
 
@@ -23,11 +23,10 @@ pi_messenger({ action: "join" })
 
 ## Phase 2: Re-anchor (CRITICAL)
 
-Read the task and epic specs to understand what to build:
+Read the task spec to understand what to build:
 
 ```typescript
 pi_messenger({ action: "task.show", id: "<TASK_ID>" })
-pi_messenger({ action: "epic.show", id: "<EPIC_ID>" })
 ```
 
 Read the task spec file for detailed requirements:
@@ -89,7 +88,7 @@ pi_messenger({
 ## Important Rules
 
 - ALWAYS join first, before any other pi_messenger calls
-- ALWAYS re-anchor by reading task and epic specs
+- ALWAYS re-anchor by reading task spec
 - ALWAYS reserve files before editing
 - ALWAYS release before completing
 - If you encounter a blocker, use `task.block` with a clear reason

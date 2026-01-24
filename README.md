@@ -12,9 +12,9 @@
 > ⚠️ **Beta** — This extension is still in active development and not fully tested. More updates coming soon.
 
 ```typescript
-pi_messenger({ join: true, spec: "./tasks.md" })
-pi_messenger({ claim: "TASK-01", reason: "Implementing login flow" })
-pi_messenger({ to: "GoldFalcon", message: "Done with auth, ready for review" })
+pi_messenger({ join: true })
+pi_messenger({ action: "plan" })           // Auto-discover PRD
+pi_messenger({ action: "work", autonomous: true })  // Run until done
 ```
 
 ## Quick Start
@@ -61,93 +61,70 @@ msg: SwiftRaven (2 peers) ●3
 
 **Swarm Coordination** — Multiple agents work on the same spec file. Claim tasks atomically, mark them complete, see who's doing what.
 
-## Swarm Mode
-
-When multiple agents work on the same spec:
-
-```typescript
-// Join with a spec file
-pi_messenger({ join: true, spec: "./feature-spec.md" })
-
-// See what's claimed and completed
-pi_messenger({ swarm: true })
-// → Completed: TASK-01, TASK-02
-//   In progress: TASK-03 (you), TASK-04 (GoldFalcon)
-
-// Claim a task (fails if already taken)
-pi_messenger({ claim: "TASK-05" })
-
-// Mark complete with notes
-pi_messenger({ complete: "TASK-05", notes: "Added error handling" })
-```
-
-One claim per agent at a time. Claims are atomic and auto-cleanup when agents exit.
-
 ## Crew: Task Orchestration
 
-Crew extends pi-messenger with multi-agent task orchestration for complex epics:
+Crew provides multi-agent task orchestration with a simplified PRD-based workflow:
 
 ```typescript
-// Create an epic
-pi_messenger({ action: "epic.create", title: "Add OAuth Login" })
-// → Created epic c-1-abc: Add OAuth Login
+// Plan from your PRD (auto-discovers PRD.md, SPEC.md, etc.)
+pi_messenger({ action: "plan" })
+// → Scouts analyze codebase
+// → Gap-analyst creates task breakdown
+// → Tasks: task-1, task-2, task-3...
 
-// Plan the epic (runs 7 scouts, creates tasks)
-pi_messenger({ action: "plan", target: "c-1-abc" })
-// → Created 4 tasks with dependencies
+// Or specify PRD path explicitly
+pi_messenger({ action: "plan", prd: "docs/PRD.md" })
 
 // Execute tasks (spawns parallel workers)
-pi_messenger({ action: "work", target: "c-1-abc", autonomous: true })
-// → Wave 1: Running c-1-abc.1, c-1-abc.2...
+pi_messenger({ action: "work" })
+// → Wave 1: Running task-1, task-2...
+
+// Or run autonomously until done/blocked
+pi_messenger({ action: "work", autonomous: true })
 
 // Review implementation
-pi_messenger({ action: "review", target: "c-1-abc.1" })
+pi_messenger({ action: "review", target: "task-1" })
 // → SHIP ✅ or NEEDS_WORK 🔄
 ```
 
-### Crew Actions
+### Crew API
 
-**Epic Management**
+**Planning**
 | Action | Description | Example |
 |--------|-------------|---------|
-| `epic.create` | Create new epic | `{ action: "epic.create", title: "OAuth" }` |
-| `epic.show` | Show epic details | `{ action: "epic.show", id: "c-1-abc" }` |
-| `epic.list` | List all epics | `{ action: "epic.list" }` |
-| `epic.close` | Close completed epic | `{ action: "epic.close", id: "c-1-abc" }` |
-| `epic.set_spec` | Update epic spec | `{ action: "epic.set_spec", id: "c-1-abc", content: "..." }` |
+| `plan` | Create plan from PRD | `{ action: "plan" }` or `{ action: "plan", prd: "..." }` |
+| `status` | Show progress | `{ action: "status" }` |
+
+**Work Execution**
+| Action | Description | Example |
+|--------|-------------|---------|
+| `work` | Run ready tasks | `{ action: "work" }` |
+| `work` (auto) | Run until done/blocked | `{ action: "work", autonomous: true }` |
 
 **Task Management**
 | Action | Description | Example |
 |--------|-------------|---------|
-| `task.create` | Create task | `{ action: "task.create", epic: "c-1-abc", title: "Config" }` |
-| `task.show` | Show task details | `{ action: "task.show", id: "c-1-abc.1" }` |
-| `task.list` | List tasks in epic | `{ action: "task.list", epic: "c-1-abc" }` |
-| `task.start` | Start task | `{ action: "task.start", id: "c-1-abc.1" }` |
-| `task.done` | Complete task | `{ action: "task.done", id: "c-1-abc.1", summary: "..." }` |
-| `task.block` | Block task | `{ action: "task.block", id: "c-1-abc.1", reason: "..." }` |
-| `task.unblock` | Unblock task | `{ action: "task.unblock", id: "c-1-abc.1" }` |
-| `task.ready` | List ready tasks | `{ action: "task.ready", epic: "c-1-abc" }` |
-| `task.reset` | Reset task to todo | `{ action: "task.reset", id: "c-1-abc.1", cascade: true }` |
+| `task.show` | Show task details | `{ action: "task.show", id: "task-1" }` |
+| `task.list` | List all tasks | `{ action: "task.list" }` |
+| `task.start` | Start task | `{ action: "task.start", id: "task-1" }` |
+| `task.done` | Complete task | `{ action: "task.done", id: "task-1", summary: "..." }` |
+| `task.block` | Block task | `{ action: "task.block", id: "task-1", reason: "..." }` |
+| `task.unblock` | Unblock task | `{ action: "task.unblock", id: "task-1" }` |
+| `task.ready` | List ready tasks | `{ action: "task.ready" }` |
+| `task.reset` | Reset task | `{ action: "task.reset", id: "task-1", cascade: true }` |
 
-**Orchestration**
+**Review**
 | Action | Description | Example |
 |--------|-------------|---------|
-| `plan` | Run scouts + create tasks | `{ action: "plan", target: "c-1-abc" }` |
-| `work` | Execute ready tasks | `{ action: "work", target: "c-1-abc" }` |
-| `review` | Review code or plan | `{ action: "review", target: "c-1-abc.1" }` |
-| `interview` | Generate clarification questions | `{ action: "interview", target: "c-1-abc" }` |
-| `sync` | Update downstream task specs | `{ action: "sync", target: "c-1-abc.1" }` |
+| `review` | Review implementation | `{ action: "review", target: "task-1" }` |
 
-**Status & Maintenance**
+**Maintenance**
 | Action | Description | Example |
 |--------|-------------|---------|
 | `crew.status` | Overall status | `{ action: "crew.status" }` |
-| `crew.validate` | Validate epic structure | `{ action: "crew.validate", id: "c-1-abc" }` |
-| `crew.agents` | List available crew agents | `{ action: "crew.agents" }` |
-| `crew.install` | Install/update crew agents | `{ action: "crew.install" }` |
-| `crew.uninstall` | Remove crew agents | `{ action: "crew.uninstall" }` |
-
-> **Note:** Crew agents are auto-installed on first use of `plan`, `work`, or `review`.
+| `crew.validate` | Validate plan | `{ action: "crew.validate" }` |
+| `crew.agents` | List crew agents | `{ action: "crew.agents" }` |
+| `crew.install` | Install crew agents | `{ action: "crew.install" }` |
 
 ### Planning Workflow
 
@@ -167,9 +144,9 @@ The `plan` action orchestrates a multi-agent analysis:
 │  Phase 1: Scouts (parallel)                                      │
 │  ├── crew-repo-scout      → Analyzes codebase structure          │
 │  ├── crew-docs-scout      → Reads project documentation          │
-│  ├── crew-practice-scout  → Finds similar patterns               │
-│  ├── crew-github-scout    → Checks issues/PRs if available       │
-│  └── ... (7 scouts total)                                        │
+│  ├── crew-practice-scout  → Finds coding conventions             │
+│  ├── crew-web-scout       → Searches web for best practices      │
+│  └── crew-github-scout    → Examines real repos via gh CLI       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -181,31 +158,21 @@ The `plan` action orchestrates a multi-agent analysis:
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Result: Tasks with Dependencies                                 │
-│  ├── c-1-abc.1: Setup types        (no deps)                    │
-│  ├── c-1-abc.2: Core logic         (depends on 1)               │
-│  ├── c-1-abc.3: API endpoints      (depends on 1)               │
-│  └── c-1-abc.4: Tests              (depends on 2, 3)            │
+│  ├── task-1: Setup types        (no deps)                       │
+│  ├── task-2: Core logic         (depends on task-1)             │
+│  ├── task-3: API endpoints      (depends on task-1)             │
+│  └── task-4: Tests              (depends on task-2, task-3)     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**No special format required** - just put your docs in the project. Scouts will find and read markdown files, READMEs, and code comments. The gap-analyst handles the task decomposition.
-
-```typescript
-// Example: Start with a PRD
-// 1. Copy your PRD into the project
-// 2. Create epic from idea
-pi_messenger({ action: "plan", target: "Build OAuth login per PRD.md", idea: true })
-// → Scouts analyze PRD.md + codebase
-// → Gap-analyst creates 5 tasks with dependencies
-// → Ready for work!
-```
+**No special format required** - just put your docs in the project. Scouts will find and read markdown files, READMEs, and code comments.
 
 ### Autonomous Mode
 
 Run tasks continuously until completion:
 
 ```typescript
-pi_messenger({ action: "work", target: "c-1-abc", autonomous: true })
+pi_messenger({ action: "work", autonomous: true })
 ```
 
 Autonomous mode:
@@ -217,21 +184,23 @@ Autonomous mode:
 
 ### Crew Overlay Tab
 
-The `/messenger` overlay includes a Crew tab showing epic/task status:
+The `/messenger` overlay includes a Crew tab showing task status:
 
 ```
 ╭─ Messenger ── SwiftRaven ── 2 peers ─────────────────╮
-│ Agents │ ▸ Crew (1) │ ● GoldFalcon │ + All           │
+│ Agents │ ▸ Crew (2/5) │ ● GoldFalcon │ + All         │
 ├──────────────────────────────────────────────────────┤
-│ ▸ 🚀 c-1-abc: OAuth Login                    [2/4]  │
-│    ├─ ✓ c-1-abc.1  Configure OAuth                  │
-│    ├─ ● c-1-abc.2  Google OAuth (SwiftRaven)        │
-│    ├─ ● c-1-abc.3  GitHub OAuth (GoldFalcon)        │
-│    └─ ○ c-1-abc.4  Login UI → deps: 2, 3            │
 │                                                      │
-│ Legend: ✓ done  ● in_progress  ○ todo  ✗ blocked    │
+│  📋 docs/PRD.md                              [2/5]   │
+│                                                      │
+│  ✓ task-1  Setup OAuth config                        │
+│  ✓ task-2  Implement token storage                   │
+│  ● task-3  Add Google provider (SwiftRaven)          │
+│  ○ task-4  Add GitHub provider → task-2              │
+│  ○ task-5  Write tests → task-3, task-4              │
+│                                                      │
 ├──────────────────────────────────────────────────────┤
-│ ● AUTO Wave 2 │ 2/4 tasks │ 1 ready │ ⏱️ 3:42       │
+│ ● AUTO Wave 2 │ 2/5 done │ 1 ready │ ⏱️ 3:42        │
 ╰──────────────────────────────────────────────────────╯
 ```
 
@@ -239,12 +208,14 @@ The `/messenger` overlay includes a Crew tab showing epic/task status:
 
 ```
 .pi/messenger/crew/
-├── epics/c-1-abc.json      # Epic metadata
-├── specs/c-1-abc.md        # Epic specification
-├── tasks/c-1-abc.1.json    # Task metadata
-├── tasks/c-1-abc.1.md      # Task specification
-├── checkpoints/            # Saved state for recovery
-└── artifacts/              # Debug artifacts
+├── plan.json               # Plan metadata (PRD path, progress)
+├── plan.md                 # Gap analyst output
+├── tasks/
+│   ├── task-1.json         # Task metadata
+│   ├── task-1.md           # Task specification
+│   └── ...
+├── artifacts/              # Debug artifacts
+└── config.json             # Project-level crew config
 ```
 
 ### Crew Configuration
@@ -256,29 +227,19 @@ Add to `~/.pi/agent/pi-messenger.json`:
   "crew": {
     "concurrency": { "scouts": 4, "workers": 2 },
     "review": { "enabled": true, "maxIterations": 3 },
-    "work": { "maxAttemptsPerTask": 5, "maxWaves": 50 },
-    "artifacts": { "enabled": true, "cleanupDays": 7 }
+    "work": { "maxAttemptsPerTask": 5, "maxWaves": 50 }
   }
 }
 ```
 
-### Checkpoints
-
-Save and restore epic state for recovery:
-
-```typescript
-// Save current state
-pi_messenger({ action: "checkpoint.save", id: "c-1-abc" })
-
-// Restore from checkpoint (rollback)
-pi_messenger({ action: "checkpoint.restore", id: "c-1-abc" })
-
-// List all checkpoints
-pi_messenger({ action: "checkpoint.list" })
-
-// Delete checkpoint
-pi_messenger({ action: "checkpoint.delete", id: "c-1-abc" })
-```
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `concurrency.scouts` | Max parallel scouts during planning | `4` |
+| `concurrency.workers` | Max parallel workers during work | `2` |
+| `review.enabled` | Auto-review tasks after completion | `true` |
+| `review.maxIterations` | Max review cycles before blocking | `3` |
+| `work.maxAttemptsPerTask` | Retries before blocking a task | `5` |
+| `work.maxWaves` | Max waves in autonomous mode | `50` |
 
 ## Chat Overlay
 
@@ -311,13 +272,15 @@ pi_messenger({ action: "checkpoint.delete", id: "c-1-abc" })
 pi_messenger({
   action: string,              // Action to perform
   
-  // Crew identifiers
-  id?: string,                 // Epic or task ID (c-1-abc or c-1-abc.1)
-  target?: string,             // Target for plan/work/review
+  // Plan
+  prd?: string,                // PRD file path
+  
+  // Task identifiers
+  id?: string,                 // Task ID (task-N)
+  target?: string,             // Target for review
   
   // Creation
-  title?: string,              // For epic.create, task.create
-  epic?: string,               // Parent epic for task operations
+  title?: string,              // For task.create
   dependsOn?: string[],        // Task dependencies
   
   // Completion
@@ -327,8 +290,8 @@ pi_messenger({
   autonomous?: boolean,        // Run continuously
   concurrency?: number,        // Override concurrency
   
-  // Review
-  type?: "plan" | "impl",      // Review type
+  // Reset
+  cascade?: boolean,           // Reset dependent tasks too
 })
 ```
 
@@ -380,17 +343,6 @@ Create `~/.pi/agent/pi-messenger.json`:
 | `autoRegister` | Join mesh on startup | `false` |
 | `autoRegisterPaths` | Folders where auto-join is enabled | `[]` |
 | `scopeToFolder` | Only see agents in same directory | `false` |
-
-**Path-based auto-register**: Use `autoRegisterPaths` instead of global auto-register. Supports `~` expansion and globs (`~/work/*`).
-
-**Folder scoping**: When enabled, agents only discover others in the same working directory. Direct messaging by name still works across folders.
-
-Manage paths via `/messenger config` or:
-
-```typescript
-pi_messenger({ autoRegisterPath: "add" })
-pi_messenger({ autoRegisterPath: "list" })
-```
 
 ## How It Works
 

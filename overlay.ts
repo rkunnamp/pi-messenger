@@ -26,9 +26,7 @@ import {
   renderCrewContent,
   renderCrewStatusBar,
   createCrewViewState,
-  toggleEpicExpansion,
-  navigateEpic,
-  getSelectedEpicId,
+  navigateTask,
   type CrewViewState,
 } from "./crew-overlay.js";
 
@@ -61,14 +59,6 @@ export class MessengerOverlay implements Component, Focusable {
     if (this.selectedAgent) {
       state.unreadCounts.set(this.selectedAgent, 0);
     }
-
-    // Auto-expand active epics
-    const epics = crewStore.listEpics(this.cwd);
-    for (const epic of epics) {
-      if (epic.status === "active" || epic.status === "planning") {
-        this.crewViewState.expandedEpics.add(epic.id);
-      }
-    }
   }
 
   private getAgentsSorted(): AgentRegistration[] {
@@ -82,8 +72,8 @@ export class MessengerOverlay implements Component, Focusable {
     return agents.some(agent => agent.spec);
   }
 
-  private hasAnyEpics(): boolean {
-    return crewStore.listEpics(this.cwd).length > 0;
+  private hasPlan(): boolean {
+    return crewStore.hasPlan(this.cwd);
   }
 
   private getMessages(): AgentMailMessage[] {
@@ -119,8 +109,8 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
-    // If no agents AND no epics, only allow escape
-    if (agents.length === 0 && !this.hasAnyEpics()) {
+    // If no agents AND no plan, only allow escape
+    if (agents.length === 0 && !this.hasPlan()) {
       return;
     }
 
@@ -138,9 +128,9 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "up")) {
       if (this.selectedAgent === CREW_TAB) {
-        // Navigate epics in crew view
-        const epics = crewStore.listEpics(this.cwd);
-        navigateEpic(this.crewViewState, -1, epics.length);
+        // Navigate tasks in crew view
+        const tasks = crewStore.getTasks(this.cwd);
+        navigateTask(this.crewViewState, -1, tasks.length);
       } else {
         this.scroll(1);
       }
@@ -150,9 +140,9 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "down")) {
       if (this.selectedAgent === CREW_TAB) {
-        // Navigate epics in crew view
-        const epics = crewStore.listEpics(this.cwd);
-        navigateEpic(this.crewViewState, 1, epics.length);
+        // Navigate tasks in crew view
+        const tasks = crewStore.getTasks(this.cwd);
+        navigateTask(this.crewViewState, 1, tasks.length);
       } else {
         this.scroll(-1);
       }
@@ -162,7 +152,7 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "home")) {
       if (this.selectedAgent === CREW_TAB) {
-        this.crewViewState.selectedEpicIndex = 0;
+        this.crewViewState.selectedTaskIndex = 0;
         this.crewViewState.scrollOffset = 0;
       } else {
         const messages = this.getMessages();
@@ -174,8 +164,8 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "end")) {
       if (this.selectedAgent === CREW_TAB) {
-        const epics = crewStore.listEpics(this.cwd);
-        this.crewViewState.selectedEpicIndex = Math.max(0, epics.length - 1);
+        const tasks = crewStore.getTasks(this.cwd);
+        this.crewViewState.selectedTaskIndex = Math.max(0, tasks.length - 1);
       } else {
         this.scrollPosition = 0;
       }
@@ -185,12 +175,7 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "enter")) {
       if (this.selectedAgent === CREW_TAB) {
-        // Toggle epic expansion
-        const epicId = getSelectedEpicId(this.cwd, this.crewViewState);
-        if (epicId) {
-          toggleEpicExpansion(this.crewViewState, epicId);
-        }
-        this.tui.requestRender();
+        // Enter does nothing in crew view - it's a read-only status display
         return;
       }
       if (this.selectedAgent !== AGENTS_TAB && this.inputText.trim()) {
@@ -214,9 +199,9 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private cycleTab(direction: number, agents: AgentRegistration[]): void {
-    // Build tab list: Agents, Crew (if epics exist), individual agents, All
+    // Build tab list: Agents, Crew (if plan exists), individual agents, All
     const tabNames: (string | null)[] = [AGENTS_TAB];
-    if (this.hasAnyEpics()) {
+    if (this.hasPlan()) {
       tabNames.push(CREW_TAB);
     }
     tabNames.push(...agents.map(a => a.name));
@@ -290,7 +275,7 @@ export class MessengerOverlay implements Component, Focusable {
         this.selectedAgent !== AGENTS_TAB && 
         this.selectedAgent !== CREW_TAB && 
         !agents.find(a => a.name === this.selectedAgent)) {
-      this.selectedAgent = agents[0]?.name ?? (this.hasAnyEpics() ? CREW_TAB : AGENTS_TAB);
+      this.selectedAgent = agents[0]?.name ?? (this.hasPlan() ? CREW_TAB : AGENTS_TAB);
       this.scrollPosition = 0;
     }
 
@@ -310,7 +295,7 @@ export class MessengerOverlay implements Component, Focusable {
     const rightBorder = borderLen - leftBorder;
     lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
 
-    if (agents.length === 0 && !this.hasAnyEpics()) {
+    if (agents.length === 0 && !this.hasPlan()) {
       // Simple empty state - no height filling
       lines.push(emptyRow());
       lines.push(emptyRow());
@@ -365,17 +350,16 @@ export class MessengerOverlay implements Component, Focusable {
     agentsTab += this.theme.fg("accent", "Agents");
     parts.push(agentsTab);
 
-    // Crew tab (only if epics exist)
-    if (this.hasAnyEpics()) {
+    // Crew tab (only if plan exists)
+    if (this.hasPlan()) {
       const isCrewSelected = this.selectedAgent === CREW_TAB;
       let crewTab = isCrewSelected ? "▸ " : "";
       crewTab += this.theme.fg("accent", "Crew");
       
-      // Show active epic count
-      const epics = crewStore.listEpics(this.cwd);
-      const activeCount = epics.filter(e => e.status === "active" || e.status === "planning").length;
-      if (activeCount > 0) {
-        crewTab += ` (${activeCount})`;
+      // Show task progress
+      const plan = crewStore.getPlan(this.cwd);
+      if (plan && plan.task_count > 0) {
+        crewTab += ` (${plan.completed_count}/${plan.task_count})`;
       }
       parts.push(crewTab);
     }

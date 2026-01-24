@@ -2,6 +2,7 @@
  * Crew - Work Handler
  * 
  * Spawns workers for ready tasks with concurrency control.
+ * Simplified: works on current plan's tasks
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -24,22 +25,14 @@ export async function execute(
 ) {
   const cwd = ctx.cwd ?? process.cwd();
   const config = loadCrewConfig(getCrewDir(cwd));
-  const { target, autonomous, concurrency: concurrencyOverride } = params;
+  const { autonomous, concurrency: concurrencyOverride } = params;
 
-  if (!target) {
-    return result("Error: target (epic ID) required for work action.", {
+  // Verify plan exists
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("No plan found. Create one first:\n\n  pi_messenger({ action: \"plan\" })\n  pi_messenger({ action: \"plan\", prd: \"path/to/PRD.md\" })", {
       mode: "work",
-      error: "missing_target"
-    });
-  }
-
-  // Verify epic exists
-  const epic = store.getEpic(cwd, target);
-  if (!epic) {
-    return result(`Error: Epic ${target} not found.`, {
-      mode: "work",
-      error: "epic_not_found",
-      target
+      error: "no_plan"
     });
   }
 
@@ -54,17 +47,17 @@ export async function execute(
   }
 
   // Get ready tasks
-  const readyTasks = store.getReadyTasks(cwd, target);
+  const readyTasks = store.getReadyTasks(cwd);
 
   if (readyTasks.length === 0) {
-    const tasks = store.getTasks(cwd, target);
+    const tasks = store.getTasks(cwd);
     const inProgress = tasks.filter(t => t.status === "in_progress");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
 
     let reason = "";
     if (done.length === tasks.length) {
-      reason = "All tasks are done! Epic is complete.";
+      reason = "🎉 All tasks are done! Plan is complete.";
     } else if (inProgress.length > 0) {
       reason = `${inProgress.length} task(s) in progress: ${inProgress.map(t => t.id).join(", ")}`;
     } else if (blocked.length > 0) {
@@ -73,9 +66,9 @@ export async function execute(
       reason = "All remaining tasks have unmet dependencies.";
     }
 
-    return result(`No ready tasks in ${target}.\n\n${reason}`, {
+    return result(`No ready tasks.\n\n${reason}`, {
       mode: "work",
-      epicId: target,
+      prd: plan.prd,
       ready: [],
       reason,
       inProgress: inProgress.map(t => t.id),
@@ -87,16 +80,16 @@ export async function execute(
   const concurrency = concurrencyOverride ?? config.concurrency.workers;
   const tasksToRun = readyTasks.slice(0, concurrency);
 
-  // If autonomous mode, set up state and persist
-  if (autonomous) {
-    startAutonomous(target, cwd);
+  // If autonomous mode, set up state and persist (only on first wave or cwd change)
+  if (autonomous && (!autonomousState.active || autonomousState.cwd !== cwd)) {
+    startAutonomous(cwd);
     appendEntry("crew-state", autonomousState);
   }
 
   // Spawn workers
   const workerTasks = tasksToRun.map(task => ({
     agent: "crew-worker",
-    task: buildWorkerPrompt(task, epic.id, epic.title, cwd)
+    task: buildWorkerPrompt(task, plan.prd, cwd)
   }));
 
   const workerResults = await spawnAgents(
@@ -136,10 +129,12 @@ export async function execute(
     }
   }
 
-  // If autonomous, record wave and check for continuation
+  // Save current wave number BEFORE addWaveResult increments it
+  const currentWave = autonomous ? autonomousState.waveNumber : 1;
+  
   if (autonomous) {
     addWaveResult({
-      waveNumber: autonomousState.waveNumber,
+      waveNumber: currentWave,
       tasksAttempted: tasksToRun.map(t => t.id),
       succeeded,
       failed,
@@ -148,8 +143,8 @@ export async function execute(
     });
 
     // Check if we should continue
-    const nextReady = store.getReadyTasks(cwd, target);
-    const allTasks = store.getTasks(cwd, target);
+    const nextReady = store.getReadyTasks(cwd);
+    const allTasks = store.getTasks(cwd);
     const allDone = allTasks.every(t => t.status === "done");
     const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
 
@@ -157,16 +152,16 @@ export async function execute(
       stopAutonomous("completed");
       appendEntry("crew-state", autonomousState);
       appendEntry("crew_wave_complete", {
-        epicId: target,
+        prd: plan.prd,
         status: "completed",
-        totalWaves: autonomousState.waveNumber,
+        totalWaves: currentWave,
         totalTasks: allTasks.length
       });
     } else if (allBlockedOrDone || nextReady.length === 0) {
       stopAutonomous("blocked");
       appendEntry("crew-state", autonomousState);
       appendEntry("crew_wave_blocked", {
-        epicId: target,
+        prd: plan.prd,
         status: "blocked",
         blockedTasks: allTasks.filter(t => t.status === "blocked").map(t => t.id)
       });
@@ -174,17 +169,17 @@ export async function execute(
       // Persist state for session recovery and signal continuation
       appendEntry("crew-state", autonomousState);
       appendEntry("crew_wave_continue", {
-        epicId: target,
-        nextWave: autonomousState.waveNumber + 1,
+        prd: plan.prd,
+        nextWave: autonomousState.waveNumber,
         readyTasks: nextReady.map(t => t.id)
       });
     }
   }
 
   // Build result
-  const updatedEpic = store.getEpic(cwd, target);
-  const progress = updatedEpic 
-    ? `${updatedEpic.completed_count}/${updatedEpic.task_count}`
+  const updatedPlan = store.getPlan(cwd);
+  const progress = updatedPlan 
+    ? `${updatedPlan.completed_count}/${updatedPlan.task_count}`
     : "unknown";
 
   let statusText = "";
@@ -192,23 +187,24 @@ export async function execute(
   if (failed.length > 0) statusText += `\n❌ Failed: ${failed.join(", ")}`;
   if (blocked.length > 0) statusText += `\n🚫 Blocked: ${blocked.join(", ")}`;
 
-  const nextReady = store.getReadyTasks(cwd, target);
+  const nextReady = store.getReadyTasks(cwd);
   const nextText = nextReady.length > 0
     ? `\n\n**Ready for next wave:** ${nextReady.map(t => t.id).join(", ")}`
     : "";
 
-  const text = `# Work Wave ${autonomous ? autonomousState.waveNumber : 1} - ${target}
+  const text = `# Work Wave ${currentWave}
 
+**PRD:** ${plan.prd}
 **Tasks attempted:** ${tasksToRun.length}
-**Epic progress:** ${progress}
+**Progress:** ${progress}
 ${statusText}${nextText}
 
 ${autonomous && nextReady.length > 0 ? "Autonomous mode: Continuing to next wave..." : ""}`;
 
   return result(text, {
     mode: "work",
-    epicId: target,
-    wave: autonomous ? autonomousState.waveNumber : 1,
+    prd: plan.prd,
+    wave: currentWave,
     attempted: tasksToRun.map(t => t.id),
     succeeded,
     failed,
@@ -222,28 +218,44 @@ ${autonomous && nextReady.length > 0 ? "Autonomous mode: Continuing to next wave
 // Worker Prompt Builder
 // =============================================================================
 
-function buildWorkerPrompt(task: Task, epicId: string, epicTitle: string, cwd: string): string {
+function buildWorkerPrompt(task: Task, prdPath: string, cwd: string): string {
   const taskSpec = store.getTaskSpec(cwd, task.id);
-  const epicSpec = store.getEpicSpec(cwd, epicId);
+  const planSpec = store.getPlanSpec(cwd);
 
   let prompt = `# Task Assignment
 
 **Task ID:** ${task.id}
 **Task Title:** ${task.title}
-**Epic ID:** ${epicId}
-**Epic Title:** ${epicTitle}
+**PRD:** ${prdPath}
+${task.attempt_count >= 1 ? `**Attempt:** ${task.attempt_count + 1} (retry after previous attempt)` : ""}
 
 ## Your Mission
 
 Implement this task following the crew-worker protocol:
 1. Join the mesh
-2. Re-anchor by reading specs
+2. Read task spec to understand requirements
 3. Start task and reserve files
 4. Implement the feature
 5. Commit your changes
 6. Release reservations and mark complete
 
 `;
+
+  // Include previous review feedback if this is a retry
+  if (task.last_review) {
+    prompt += `## ⚠️ Previous Review Feedback
+
+**Verdict:** ${task.last_review.verdict}
+
+${task.last_review.summary}
+
+${task.last_review.issues.length > 0 ? `**Issues to fix:**\n${task.last_review.issues.map(i => `- ${i}`).join("\n")}\n` : ""}
+${task.last_review.suggestions.length > 0 ? `**Suggestions:**\n${task.last_review.suggestions.map(s => `- ${s}`).join("\n")}\n` : ""}
+
+**You MUST address the issues above in this attempt.**
+
+`;
+  }
 
   if (taskSpec && !taskSpec.includes("*Spec pending*")) {
     prompt += `## Task Specification
@@ -262,12 +274,12 @@ These tasks are already complete - you can reference their implementations.
 `;
   }
 
-  if (epicSpec && !epicSpec.includes("*Spec pending*")) {
-    // Include truncated epic spec for context
-    const truncatedSpec = epicSpec.length > 2000 
-      ? epicSpec.slice(0, 2000) + "\n\n[Spec truncated - read full spec from .pi/messenger/crew/specs/${epicId}.md]"
-      : epicSpec;
-    prompt += `## Epic Context
+  if (planSpec && !planSpec.includes("*Spec pending*")) {
+    // Include truncated plan spec for context
+    const truncatedSpec = planSpec.length > 2000 
+      ? planSpec.slice(0, 2000) + `\n\n[Spec truncated - read full spec from .pi/messenger/crew/plan.md]`
+      : planSpec;
+    prompt += `## Plan Context
 
 ${truncatedSpec}
 `;

@@ -1,5 +1,140 @@
 # Changelog
 
+## 0.7.0 - 2026-01-23
+
+### Breaking Changes
+
+**Epic System Removed** - Crew has been simplified to a PRD-based workflow:
+
+| Before | After |
+|--------|-------|
+| PRD → epic.create → plan epic → work on epic | PRD → plan → work → done |
+| Task IDs: `c-1-abc.1`, `c-1-abc.2` | Task IDs: `task-1`, `task-2` |
+| `target: "c-1-abc"` (epic ID) required | No target needed - works on current plan |
+
+### Removed
+
+- **Epic actions** - `epic.create`, `epic.show`, `epic.list`, `epic.close`, `epic.set_spec`
+- **Checkpoint actions** - `checkpoint.save`, `checkpoint.restore`, `checkpoint.delete`, `checkpoint.list`
+- **Epic validation** - `crew.validate` now validates the plan, not an epic
+- **Epic-scoped task operations** - `task.ready` and `task.list` no longer require `epic` parameter
+- **Files deleted:**
+  - `crew/handlers/epic.ts` (~285 lines)
+  - `crew/handlers/checkpoint.ts` (~190 lines)
+  - Epic CRUD functions from `crew/store.ts` (~100 lines)
+
+### Changed
+
+- **`plan` action** - Now takes `prd` parameter instead of `target`:
+  ```typescript
+  // Before
+  pi_messenger({ action: "plan", target: "c-1-abc" })
+  
+  // After
+  pi_messenger({ action: "plan" })                    // Auto-discover PRD
+  pi_messenger({ action: "plan", prd: "docs/PRD.md" }) // Explicit path
+  ```
+
+- **`work` action** - No longer requires target:
+  ```typescript
+  // Before
+  pi_messenger({ action: "work", target: "c-1-abc" })
+  
+  // After
+  pi_messenger({ action: "work" })                    // Work on current plan
+  pi_messenger({ action: "work", autonomous: true })  // Autonomous mode
+  ```
+
+- **`status` action** - Now shows plan progress instead of epic list
+
+- **Task IDs** - Simplified from `c-N-xxx.M` to `task-N`:
+  ```typescript
+  // Before
+  pi_messenger({ action: "task.show", id: "c-1-abc.1" })
+  
+  // After
+  pi_messenger({ action: "task.show", id: "task-1" })
+  ```
+
+- **Crew overlay** - Now shows flat task list under PRD name (no epic grouping)
+
+### Storage
+
+New simplified storage structure:
+```
+.pi/messenger/crew/
+├── plan.json              # Plan metadata (PRD path, progress)
+├── plan.md                # Gap analyst output
+├── tasks/
+│   ├── task-1.json        # Task metadata
+│   ├── task-1.md          # Task spec
+│   └── ...
+├── artifacts/             # Unchanged
+└── config.json            # Unchanged
+```
+
+### Benefits
+
+1. **Simpler mental model** - PRD → Tasks → Done
+2. **Less API surface** - 9 fewer actions to learn
+3. **Cleaner IDs** - `task-1` instead of `c-1-abc.1`
+4. **PRD is the spec** - No redundant epic spec
+5. **Faster onboarding** - Fewer concepts to explain
+6. **~475 lines removed** - Smaller, more maintainable codebase
+
+---
+
+## 0.6.3 - 2026-01-23
+
+### Changed
+
+- **Crew agent model assignments** - Optimized for cost and capability:
+  - Scouts (deep): `claude-opus-4-5` - repo-scout, github-scout, practice-scout
+  - Scouts (fast): `claude-haiku-4-5` - docs-scout, web-scout
+  - Analysts: `claude-opus-4-5` - gap-analyst, interview-generator, plan-sync
+  - Worker: `claude-opus-4-5` - quality code generation
+  - Reviewer: `openai/gpt-5.2-high` - diverse perspective for review
+
+- **Streamlined scout roster** - Reduced from 7 to 5 focused scouts:
+  - Removed: `crew-memory-scout` (memory system not implemented)
+  - Removed: `crew-epic-scout` (only useful for multi-epic projects)
+  - Removed: `crew-docs-gap-scout` (merged into gap-analyst)
+  - Renamed: `crew-github-scout` → `crew-web-scout` (web search focus)
+  - New: `crew-github-scout` (gh CLI integration, sparse checkouts)
+
+### Added
+
+- **PRD auto-discovery** - Plan handler now finds and includes PRD/spec files:
+  - Searches: `PRD.md`, `SPEC.md`, `REQUIREMENTS.md`, `DESIGN.md`, `PLAN.md`
+  - Also checks `docs/` subdirectory
+  - Content included in all scout prompts (up to 50KB)
+
+- **Review feedback loop** - Workers see previous review feedback on retry:
+  - `last_review` field added to Task type
+  - Review handler stores feedback after each review
+  - Worker prompt includes issues to fix on retry attempts
+
+- **Scout skip logic** - web-scout and github-scout assess relevance first:
+  - Can skip with explanation if not relevant to the feature
+  - Saves time and API costs for internal/simple features
+
+- **ARCHITECTURE.md** - New documentation with orchestration flow diagram, model summary, and agent inventory
+
+### Fixed
+
+- Template literal bug in worker prompt (epicId not interpolating)
+- Retry detection off-by-one (now correctly shows attempt number)
+- Case-insensitive filesystem duplicate PRD reads (uses realpath)
+- Wave number tracking in autonomous mode (was off-by-one after addWaveResult)
+- CREW_AGENTS list in install.ts (removed deleted agents, added crew-web-scout)
+- Corrupted crew-plan-sync.md (had TypeScript code appended)
+
+## 0.6.2 - 2026-01-23
+
+### Changed
+
+- Initial crew agent model assignments (superseded by 0.6.3)
+
 ## 0.6.1 - 2026-01-23
 
 ### Added

@@ -2,6 +2,7 @@
  * Crew - Task Handlers
  * 
  * Operations: create, show, list, start, done, block, unblock, ready, reset
+ * Simplified: tasks belong to the plan, not an epic
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -25,7 +26,7 @@ export async function execute(
     case "show":
       return taskShow(cwd, params);
     case "list":
-      return taskList(cwd, params);
+      return taskList(cwd);
     case "start":
       return taskStart(cwd, params, state);
     case "done":
@@ -35,7 +36,7 @@ export async function execute(
     case "unblock":
       return taskUnblock(cwd, params);
     case "ready":
-      return taskReady(cwd, params);
+      return taskReady(cwd);
     case "reset":
       return taskReset(cwd, params);
     default:
@@ -48,17 +49,16 @@ export async function execute(
 // =============================================================================
 
 function taskCreate(cwd: string, params: CrewParams) {
-  if (!params.epic) {
-    return result("Error: epic required for task.create", { mode: "task.create", error: "missing_epic" });
-  }
   if (!params.title) {
     return result("Error: title required for task.create", { mode: "task.create", error: "missing_title" });
   }
 
-  // Verify epic exists
-  const epic = store.getEpic(cwd, params.epic);
-  if (!epic) {
-    return result(`Error: Epic ${params.epic} not found`, { mode: "task.create", error: "epic_not_found", epic: params.epic });
+  // Verify plan exists
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("Error: No plan exists. Create one first with pi_messenger({ action: \"plan\" })", { 
+      mode: "task.create", error: "no_plan" 
+    });
   }
 
   // Validate dependencies exist
@@ -68,15 +68,10 @@ function taskCreate(cwd: string, params: CrewParams) {
       if (!dep) {
         return result(`Error: Dependency ${depId} not found`, { mode: "task.create", error: "dependency_not_found", dependency: depId });
       }
-      if (dep.epic_id !== params.epic) {
-        return result(`Error: Dependency ${depId} belongs to different epic (${dep.epic_id})`, { 
-          mode: "task.create", error: "cross_epic_dependency", dependency: depId 
-        });
-      }
     }
   }
 
-  const task = store.createTask(cwd, params.epic, params.title, params.content, params.dependsOn);
+  const task = store.createTask(cwd, params.title, params.content, params.dependsOn);
 
   const depsText = task.depends_on.length > 0 
     ? `\n**Depends on:** ${task.depends_on.join(", ")}`
@@ -85,7 +80,6 @@ function taskCreate(cwd: string, params: CrewParams) {
   const text = `✅ Created task **${task.id}**
 
 **Title:** ${task.title}
-**Epic:** ${params.epic}
 **Status:** ${task.status}${depsText}
 
 Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
@@ -95,7 +89,6 @@ Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
     task: {
       id: task.id,
       title: task.title,
-      epic_id: task.epic_id,
       status: task.status,
       depends_on: task.depends_on,
     }
@@ -156,7 +149,6 @@ function taskShow(cwd: string, params: CrewParams) {
   const text = `# Task ${task.id}: ${task.title}
 
 ${statusIcon} **Status:** ${task.status}${statusDetails}
-**Epic:** ${task.epic_id}
 **Attempts:** ${task.attempt_count}${depsText}${specPreview}`;
 
   return result(text, {
@@ -170,66 +162,38 @@ ${statusIcon} **Status:** ${task.status}${statusDetails}
 // task.list
 // =============================================================================
 
-function taskList(cwd: string, params: CrewParams) {
-  const epicId = params.epic;
-  
-  if (!epicId) {
-    // List all tasks across all epics
-    const epics = store.listEpics(cwd);
-    if (epics.length === 0) {
-      return result("No epics found.", { mode: "task.list", tasks: [] });
-    }
-
-    const lines: string[] = ["# All Tasks\n"];
-    let totalTasks = 0;
-
-    for (const epic of epics) {
-      const tasks = store.getTasks(cwd, epic.id);
-      if (tasks.length === 0) continue;
-
-      lines.push(`## ${epic.id}: ${epic.title}`);
-      for (const task of tasks) {
-        const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
-        lines.push(`  ${icon} ${task.id}: ${task.title}`);
-        totalTasks++;
-      }
-      lines.push("");
-    }
-
-    if (totalTasks === 0) {
-      return result("No tasks found.", { mode: "task.list", tasks: [] });
-    }
-
-    return result(lines.join("\n"), { mode: "task.list", count: totalTasks });
-  }
-
-  // List tasks for specific epic
-  const epic = store.getEpic(cwd, epicId);
-  if (!epic) {
-    return result(`Error: Epic ${epicId} not found`, { mode: "task.list", error: "epic_not_found", epic: epicId });
-  }
-
-  const tasks = store.getTasks(cwd, epicId);
-  if (tasks.length === 0) {
-    return result(`No tasks in epic ${epicId}. Create with: \`pi_messenger({ action: "task.create", epic: "${epicId}", title: "..." })\``, {
-      mode: "task.list",
-      epic: epicId,
-      tasks: [],
+function taskList(cwd: string) {
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
+      mode: "task.list", tasks: [], hasPlan: false 
     });
   }
 
-  const lines: string[] = [`# Tasks for ${epicId}: ${epic.title}\n`];
+  const tasks = store.getTasks(cwd);
+  if (tasks.length === 0) {
+    return result(`No tasks in plan. Create with: \`pi_messenger({ action: "task.create", title: "..." })\``, {
+      mode: "task.list",
+      tasks: [],
+      prd: plan.prd,
+    });
+  }
+
+  const lines: string[] = [`# Tasks for ${plan.prd}\n`];
   
   for (const task of tasks) {
     const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
-    const deps = task.depends_on.length > 0 ? ` (→ ${task.depends_on.join(", ")})` : "";
+    const deps = task.depends_on.length > 0 ? ` → deps: ${task.depends_on.join(", ")}` : "";
     const assignee = task.assigned_to ? ` [${task.assigned_to}]` : "";
     lines.push(`${icon} **${task.id}**: ${task.title}${assignee}${deps}`);
   }
 
+  const done = tasks.filter(t => t.status === "done").length;
+  lines.push(`\n**Progress:** ${done}/${tasks.length}`);
+
   return result(lines.join("\n"), {
     mode: "task.list",
-    epic: epicId,
+    prd: plan.prd,
     tasks: tasks.map(t => ({
       id: t.id,
       title: t.title,
@@ -343,16 +307,16 @@ function taskDone(cwd: string, params: CrewParams) {
     return result(`Error: Failed to complete task ${id}`, { mode: "task.done", error: "complete_failed", id });
   }
 
-  // Check if all tasks in epic are done
-  const tasks = store.getTasks(cwd, task.epic_id);
+  // Check progress
+  const plan = store.getPlan(cwd);
+  const tasks = store.getTasks(cwd);
   const remaining = tasks.filter(t => t.status !== "done");
-  const epic = store.getEpic(cwd, task.epic_id);
 
   let nextSteps = "";
   if (remaining.length === 0) {
-    nextSteps = `\n\n🎉 **All tasks complete!** Close epic: \`pi_messenger({ action: "epic.close", id: "${task.epic_id}" })\``;
+    nextSteps = `\n\n🎉 **All tasks complete!** Plan is finished.`;
   } else {
-    const ready = store.getReadyTasks(cwd, task.epic_id);
+    const ready = store.getReadyTasks(cwd);
     if (ready.length > 0) {
       nextSteps = `\n\n**Ready tasks:** ${ready.map(t => t.id).join(", ")}`;
     }
@@ -361,7 +325,7 @@ function taskDone(cwd: string, params: CrewParams) {
   const text = `✅ Completed task **${id}**
 
 **Summary:** ${summary}
-**Epic progress:** ${epic?.completed_count}/${epic?.task_count}${nextSteps}`;
+**Progress:** ${plan?.completed_count}/${plan?.task_count}${nextSteps}`;
 
   return result(text, {
     mode: "task.done",
@@ -371,9 +335,9 @@ function taskDone(cwd: string, params: CrewParams) {
       status: completed.status,
       summary: completed.summary,
     },
-    epicProgress: {
-      completed: epic?.completed_count ?? 0,
-      total: epic?.task_count ?? 0,
+    progress: {
+      completed: plan?.completed_count ?? 0,
+      total: plan?.task_count ?? 0,
     }
   });
 }
@@ -463,21 +427,18 @@ Task is now ready to start: \`pi_messenger({ action: "task.start", id: "${id}" }
 // task.ready
 // =============================================================================
 
-function taskReady(cwd: string, params: CrewParams) {
-  const epicId = params.epic;
-  if (!epicId) {
-    return result("Error: epic required for task.ready", { mode: "task.ready", error: "missing_epic" });
+function taskReady(cwd: string) {
+  const plan = store.getPlan(cwd);
+  if (!plan) {
+    return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
+      mode: "task.ready", ready: [], hasPlan: false 
+    });
   }
 
-  const epic = store.getEpic(cwd, epicId);
-  if (!epic) {
-    return result(`Error: Epic ${epicId} not found`, { mode: "task.ready", error: "epic_not_found", epic: epicId });
-  }
-
-  const ready = store.getReadyTasks(cwd, epicId);
+  const ready = store.getReadyTasks(cwd);
 
   if (ready.length === 0) {
-    const tasks = store.getTasks(cwd, epicId);
+    const tasks = store.getTasks(cwd);
     const inProgress = tasks.filter(t => t.status === "in_progress");
     const blocked = tasks.filter(t => t.status === "blocked");
     const done = tasks.filter(t => t.status === "done");
@@ -493,23 +454,22 @@ function taskReady(cwd: string, params: CrewParams) {
       reason = "All remaining tasks have unmet dependencies.";
     }
 
-    return result(`No ready tasks in ${epicId}.\n\n${reason}`, {
+    return result(`No ready tasks.\n\n${reason}`, {
       mode: "task.ready",
-      epic: epicId,
       ready: [],
       reason,
     });
   }
 
-  const lines: string[] = [`# Ready Tasks in ${epicId}\n`];
+  const lines: string[] = [`# Ready Tasks\n`];
   for (const task of ready) {
     lines.push(`⬜ **${task.id}**: ${task.title}`);
   }
   lines.push(`\nStart one: \`pi_messenger({ action: "task.start", id: "${ready[0].id}" })\``);
+  lines.push(`Or run all: \`pi_messenger({ action: "work" })\``);
 
   return result(lines.join("\n"), {
     mode: "task.ready",
-    epic: epicId,
     ready: ready.map(t => ({
       id: t.id,
       title: t.title,

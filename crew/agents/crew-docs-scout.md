@@ -2,7 +2,7 @@
 name: crew-docs-scout
 description: Searches project documentation for relevant information
 tools: read, bash, grep, find
-model: claude-sonnet-4-20250514
+model: claude-haiku-4-5
 crewRole: scout
 maxOutput: { bytes: 51200, lines: 500 }
 parallel: true

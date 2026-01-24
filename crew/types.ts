@@ -1,7 +1,7 @@
 /**
  * Crew - Type Definitions
  * 
- * Complete type definitions for epics, tasks, configuration, and parameters.
+ * Simplified PRD-based workflow types.
  */
 
 import type { MaxOutputConfig } from "./utils/truncate.js";
@@ -9,20 +9,15 @@ import type { AgentProgress } from "./utils/progress.js";
 import type { CrewAgentConfig } from "./utils/discover.js";
 
 // =============================================================================
-// Epic Types
+// Plan Types
 // =============================================================================
 
-export type EpicStatus = "planning" | "active" | "blocked" | "completed" | "archived";
-
-export interface Epic {
-  id: string;                    // c-N-xxx format
-  title: string;
-  status: EpicStatus;
+export interface Plan {
+  prd: string;                   // Path to PRD file (relative to cwd)
   created_at: string;            // ISO timestamp
   updated_at: string;            // ISO timestamp
-  closed_at?: string;            // ISO timestamp (when completed/archived)
-  task_count: number;            // Denormalized for quick access
-  completed_count: number;       // Denormalized for quick access
+  task_count: number;            // Total tasks
+  completed_count: number;       // Completed tasks
 }
 
 // =============================================================================
@@ -38,8 +33,7 @@ export interface TaskEvidence {
 }
 
 export interface Task {
-  id: string;                    // c-N-xxx.M format
-  epic_id: string;               // Parent epic ID
+  id: string;                    // task-N format
   title: string;
   status: TaskStatus;
   depends_on: string[];          // Task IDs this depends on
@@ -53,19 +47,15 @@ export interface Task {
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block
   attempt_count: number;         // How many times attempted (for auto-block)
+  last_review?: ReviewFeedback;  // Feedback from last review (for retry)
 }
 
-// =============================================================================
-// Checkpoint Types
-// =============================================================================
-
-export interface Checkpoint {
-  id: string;                    // Epic ID
-  created_at: string;
-  epic: Epic;
-  tasks: Task[];
-  epic_spec: string;             // Content of specs/c-N-xxx.md
-  task_specs: Record<string, string>;  // task_id -> spec content
+export interface ReviewFeedback {
+  verdict: ReviewVerdict;
+  summary: string;
+  issues: string[];
+  suggestions: string[];
+  reviewed_at: string;           // ISO timestamp
 }
 
 // =============================================================================
@@ -76,27 +66,26 @@ export interface CrewParams {
   // Action
   action?: string;
 
-  // Crew IDs
-  id?: string;                   // Epic or task ID (c-N-xxx or c-N-xxx.M)
+  // Plan
+  prd?: string;                  // PRD file path for plan action
+
+  // Task IDs
+  id?: string;                   // Task ID (task-N)
   taskId?: string;               // Swarm task ID (for claim/unclaim/complete)
 
   // Creation
   title?: string;
-  epic?: string;                 // Parent epic for task operations
   dependsOn?: string[];
-
-  // Orchestration
-  target?: string;
-  idea?: boolean;
 
   // Completion
   summary?: string;
   evidence?: TaskEvidence;
 
   // Content
-  content?: string;
+  content?: string;                // Task description/spec content
 
   // Review
+  target?: string;               // Task ID to review
   type?: "plan" | "impl";
 
   // Work options

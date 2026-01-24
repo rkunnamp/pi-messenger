@@ -1,14 +1,14 @@
 /**
  * Crew - Store Operations
  * 
- * All CRUD operations for epics, tasks, specs, and checkpoints.
+ * Simplified PRD-based storage: plan.json + tasks/*.json
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
-import type { Epic, Task, TaskEvidence, Checkpoint, EpicStatus } from "./types.js";
-import { allocateEpicId, allocateTaskId } from "./id-allocator.js";
+import type { Plan, Task, TaskEvidence } from "./types.js";
+import { allocateTaskId } from "./id-allocator.js";
 
 // =============================================================================
 // Directory Helpers
@@ -24,24 +24,12 @@ export function getCrewDir(cwd: string): string {
   return path.join(cwd, ".pi", "messenger", "crew");
 }
 
-function getEpicsDir(cwd: string): string {
-  return path.join(getCrewDir(cwd), "epics");
-}
-
-function getSpecsDir(cwd: string): string {
-  return path.join(getCrewDir(cwd), "specs");
-}
-
 function getTasksDir(cwd: string): string {
   return path.join(getCrewDir(cwd), "tasks");
 }
 
 function getBlocksDir(cwd: string): string {
   return path.join(getCrewDir(cwd), "blocks");
-}
-
-function getCheckpointsDir(cwd: string): string {
-  return path.join(getCrewDir(cwd), "checkpoints");
 }
 
 // =============================================================================
@@ -81,90 +69,81 @@ function writeText(filePath: string, content: string): void {
 }
 
 // =============================================================================
-// Epic Operations
+// Plan Operations
 // =============================================================================
 
-export function createEpic(cwd: string, title: string): Epic {
-  const id = allocateEpicId(cwd);
-  const now = new Date().toISOString();
+export function getPlan(cwd: string): Plan | null {
+  return readJson<Plan>(path.join(getCrewDir(cwd), "plan.json"));
+}
 
-  const epic: Epic = {
-    id,
-    title,
-    status: "planning",
+export function createPlan(cwd: string, prdPath: string): Plan {
+  const now = new Date().toISOString();
+  
+  const plan: Plan = {
+    prd: prdPath,
     created_at: now,
     updated_at: now,
     task_count: 0,
     completed_count: 0,
   };
 
-  writeJson(path.join(getEpicsDir(cwd), `${id}.json`), epic);
-
-  // Create empty spec file
-  writeText(path.join(getSpecsDir(cwd), `${id}.md`), `# ${title}\n\n*Spec pending planning phase*\n`);
-
-  return epic;
+  writeJson(path.join(getCrewDir(cwd), "plan.json"), plan);
+  return plan;
 }
 
-export function getEpic(cwd: string, epicId: string): Epic | null {
-  return readJson<Epic>(path.join(getEpicsDir(cwd), `${epicId}.json`));
-}
+export function updatePlan(cwd: string, updates: Partial<Plan>): Plan | null {
+  const plan = getPlan(cwd);
+  if (!plan) return null;
 
-export function updateEpic(cwd: string, epicId: string, updates: Partial<Epic>): Epic | null {
-  const epic = getEpic(cwd, epicId);
-  if (!epic) return null;
-
-  const updated: Epic = {
-    ...epic,
+  const updated: Plan = {
+    ...plan,
     ...updates,
     updated_at: new Date().toISOString(),
   };
 
-  writeJson(path.join(getEpicsDir(cwd), `${epicId}.json`), updated);
+  writeJson(path.join(getCrewDir(cwd), "plan.json"), updated);
   return updated;
 }
 
-export function listEpics(cwd: string): Epic[] {
-  const dir = getEpicsDir(cwd);
-  if (!fs.existsSync(dir)) return [];
-
-  const epics: Epic[] = [];
-  for (const file of fs.readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
-    const epic = readJson<Epic>(path.join(dir, file));
-    if (epic) epics.push(epic);
+export function deletePlan(cwd: string): boolean {
+  const planPath = path.join(getCrewDir(cwd), "plan.json");
+  const planMdPath = path.join(getCrewDir(cwd), "plan.md");
+  const tasksDir = getTasksDir(cwd);
+  
+  let deleted = false;
+  
+  // Delete plan.json
+  if (fs.existsSync(planPath)) {
+    fs.unlinkSync(planPath);
+    deleted = true;
   }
-
-  // Sort by created_at descending (newest first)
-  return epics.sort((a, b) => b.created_at.localeCompare(a.created_at));
-}
-
-export function closeEpic(cwd: string, epicId: string): Epic | null {
-  const epic = getEpic(cwd, epicId);
-  if (!epic) return null;
-
-  // Verify all tasks are done
-  const tasks = getTasks(cwd, epicId);
-  const allDone = tasks.every(t => t.status === "done");
-  if (!allDone) return null;
-
-  return updateEpic(cwd, epicId, {
-    status: "completed",
-    closed_at: new Date().toISOString(),
-  });
+  
+  // Delete plan.md
+  if (fs.existsSync(planMdPath)) {
+    fs.unlinkSync(planMdPath);
+  }
+  
+  // Delete all task files
+  if (fs.existsSync(tasksDir)) {
+    for (const file of fs.readdirSync(tasksDir)) {
+      fs.unlinkSync(path.join(tasksDir, file));
+    }
+  }
+  
+  return deleted;
 }
 
 // =============================================================================
-// Epic Spec Operations
+// Plan Spec Operations
 // =============================================================================
 
-export function getEpicSpec(cwd: string, epicId: string): string | null {
-  return readText(path.join(getSpecsDir(cwd), `${epicId}.md`));
+export function getPlanSpec(cwd: string): string | null {
+  return readText(path.join(getCrewDir(cwd), "plan.md"));
 }
 
-export function setEpicSpec(cwd: string, epicId: string, content: string): void {
-  writeText(path.join(getSpecsDir(cwd), `${epicId}.md`), content);
-  updateEpic(cwd, epicId, {}); // Touch updated_at
+export function setPlanSpec(cwd: string, content: string): void {
+  writeText(path.join(getCrewDir(cwd), "plan.md"), content);
+  updatePlan(cwd, {}); // Touch updated_at
 }
 
 // =============================================================================
@@ -173,17 +152,15 @@ export function setEpicSpec(cwd: string, epicId: string, content: string): void 
 
 export function createTask(
   cwd: string,
-  epicId: string,
   title: string,
   description?: string,
   dependsOn?: string[]
 ): Task {
-  const id = allocateTaskId(cwd, epicId);
+  const id = allocateTaskId(cwd);
   const now = new Date().toISOString();
 
   const task: Task = {
     id,
-    epic_id: epicId,
     title,
     status: "todo",
     depends_on: dependsOn ?? [],
@@ -200,10 +177,10 @@ export function createTask(
     : `# ${title}\n\n*Spec pending*\n`;
   writeText(path.join(getTasksDir(cwd), `${id}.md`), specContent);
 
-  // Update epic task count
-  const epic = getEpic(cwd, epicId);
-  if (epic) {
-    updateEpic(cwd, epicId, { task_count: epic.task_count + 1 });
+  // Update plan task count
+  const plan = getPlan(cwd);
+  if (plan) {
+    updatePlan(cwd, { task_count: plan.task_count + 1 });
   }
 
   return task;
@@ -227,7 +204,7 @@ export function updateTask(cwd: string, taskId: string, updates: Partial<Task>):
   return updated;
 }
 
-export function getTasks(cwd: string, epicId?: string): Task[] {
+export function getTasks(cwd: string): Task[] {
   const dir = getTasksDir(cwd);
   if (!fs.existsSync(dir)) return [];
 
@@ -235,17 +212,13 @@ export function getTasks(cwd: string, epicId?: string): Task[] {
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
     const task = readJson<Task>(path.join(dir, file));
-    if (!task) continue;
-    if (epicId && task.epic_id !== epicId) continue;
-    tasks.push(task);
+    if (task) tasks.push(task);
   }
 
-  // Sort by ID (maintains creation order)
+  // Sort by ID number (task-1, task-2, ...)
   return tasks.sort((a, b) => {
-    const aParts = a.id.split(".");
-    const bParts = b.id.split(".");
-    const aNum = parseInt(aParts[aParts.length - 1]);
-    const bNum = parseInt(bParts[bParts.length - 1]);
+    const aNum = parseInt(a.id.replace("task-", ""));
+    const bNum = parseInt(b.id.replace("task-", ""));
     return aNum - bNum;
   });
 }
@@ -301,15 +274,11 @@ export function completeTask(
     assigned_to: undefined,
   });
 
-  // Update epic completed count
+  // Update plan completed count
   if (updated) {
-    const epic = getEpic(cwd, task.epic_id);
-    if (epic) {
-      const newCompletedCount = epic.completed_count + 1;
-      updateEpic(cwd, task.epic_id, {
-        completed_count: newCompletedCount,
-        status: newCompletedCount >= epic.task_count ? "completed" : "active",
-      });
+    const plan = getPlan(cwd);
+    if (plan) {
+      updatePlan(cwd, { completed_count: plan.completed_count + 1 });
     }
   }
 
@@ -354,6 +323,7 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
   if (!task) return [];
 
   const resetTasks: Task[] = [];
+  const wasDone = task.status === "done";
 
   // Reset this task
   const updated = updateTask(cwd, taskId, {
@@ -371,7 +341,7 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 
   // If cascade, reset all tasks that depend on this one
   if (cascade) {
-    const allTasks = getTasks(cwd, task.epic_id);
+    const allTasks = getTasks(cwd);
     for (const t of allTasks) {
       if (t.depends_on.includes(taskId) && t.status !== "todo") {
         const cascaded = resetTask(cwd, t.id, true);
@@ -380,15 +350,12 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
     }
   }
 
-  // Update epic completed count if needed
-  if (resetTasks.length > 0) {
-    const epic = getEpic(cwd, task.epic_id);
-    if (epic) {
-      const doneTasks = getTasks(cwd, task.epic_id).filter(t => t.status === "done");
-      updateEpic(cwd, task.epic_id, {
-        completed_count: doneTasks.length,
-        status: doneTasks.length < epic.task_count ? "active" : "completed",
-      });
+  // Update plan completed count if needed
+  if (wasDone && resetTasks.length > 0) {
+    const plan = getPlan(cwd);
+    if (plan) {
+      const doneTasks = getTasks(cwd).filter(t => t.status === "done");
+      updatePlan(cwd, { completed_count: doneTasks.length });
     }
   }
 
@@ -399,8 +366,8 @@ export function resetTask(cwd: string, taskId: string, cascade: boolean = false)
 // Ready Tasks (Dependency Resolution)
 // =============================================================================
 
-export function getReadyTasks(cwd: string, epicId: string): Task[] {
-  const tasks = getTasks(cwd, epicId);
+export function getReadyTasks(cwd: string): Task[] {
+  const tasks = getTasks(cwd);
   const doneIds = new Set(tasks.filter(t => t.status === "done").map(t => t.id));
 
   return tasks.filter(task => {
@@ -413,74 +380,6 @@ export function getReadyTasks(cwd: string, epicId: string): Task[] {
 }
 
 // =============================================================================
-// Checkpoint Operations
-// =============================================================================
-
-export function saveCheckpoint(cwd: string, epicId: string): Checkpoint | null {
-  const epic = getEpic(cwd, epicId);
-  if (!epic) return null;
-
-  const tasks = getTasks(cwd, epicId);
-  const epicSpec = getEpicSpec(cwd, epicId) ?? "";
-
-  const taskSpecs: Record<string, string> = {};
-  for (const task of tasks) {
-    const spec = getTaskSpec(cwd, task.id);
-    if (spec) taskSpecs[task.id] = spec;
-  }
-
-  const checkpoint: Checkpoint = {
-    id: epicId,
-    created_at: new Date().toISOString(),
-    epic,
-    tasks,
-    epic_spec: epicSpec,
-    task_specs: taskSpecs,
-  };
-
-  writeJson(path.join(getCheckpointsDir(cwd), `${epicId}.json`), checkpoint);
-  return checkpoint;
-}
-
-export function getCheckpoint(cwd: string, epicId: string): Checkpoint | null {
-  return readJson<Checkpoint>(path.join(getCheckpointsDir(cwd), `${epicId}.json`));
-}
-
-export function restoreCheckpoint(cwd: string, epicId: string): boolean {
-  const checkpoint = getCheckpoint(cwd, epicId);
-  if (!checkpoint) return false;
-
-  // Restore epic
-  writeJson(path.join(getEpicsDir(cwd), `${epicId}.json`), checkpoint.epic);
-
-  // Restore epic spec
-  writeText(path.join(getSpecsDir(cwd), `${epicId}.md`), checkpoint.epic_spec);
-
-  // Restore tasks and their specs
-  for (const task of checkpoint.tasks) {
-    writeJson(path.join(getTasksDir(cwd), `${task.id}.json`), task);
-    const spec = checkpoint.task_specs[task.id];
-    if (spec) {
-      writeText(path.join(getTasksDir(cwd), `${task.id}.md`), spec);
-    }
-  }
-
-  return true;
-}
-
-export function deleteCheckpoint(cwd: string, epicId: string): boolean {
-  const filePath = path.join(getCheckpointsDir(cwd), `${epicId}.json`);
-  if (!fs.existsSync(filePath)) return false;
-
-  try {
-    fs.unlinkSync(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// =============================================================================
 // Validation
 // =============================================================================
 
@@ -490,16 +389,16 @@ export interface ValidationResult {
   warnings: string[];
 }
 
-export function validateEpic(cwd: string, epicId: string): ValidationResult {
+export function validatePlan(cwd: string): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  const epic = getEpic(cwd, epicId);
-  if (!epic) {
-    return { valid: false, errors: ["Epic not found"], warnings: [] };
+  const plan = getPlan(cwd);
+  if (!plan) {
+    return { valid: false, errors: ["No plan found"], warnings: [] };
   }
 
-  const tasks = getTasks(cwd, epicId);
+  const tasks = getTasks(cwd);
 
   // Check for orphan dependencies
   const taskIds = new Set(tasks.map(t => t.id));
@@ -549,20 +448,20 @@ export function validateEpic(cwd: string, epicId: string): ValidationResult {
     }
   }
 
-  // Check epic spec
-  const epicSpec = getEpicSpec(cwd, epicId);
-  if (!epicSpec || epicSpec.includes("*Spec pending*")) {
-    warnings.push("Epic has no detailed spec");
+  // Check plan spec
+  const planSpec = getPlanSpec(cwd);
+  if (!planSpec || planSpec.includes("*Spec pending*")) {
+    warnings.push("Plan has no detailed spec");
   }
 
   // Check task counts
-  if (epic.task_count !== tasks.length) {
-    warnings.push(`Epic task_count (${epic.task_count}) doesn't match actual tasks (${tasks.length})`);
+  if (plan.task_count !== tasks.length) {
+    warnings.push(`Plan task_count (${plan.task_count}) doesn't match actual tasks (${tasks.length})`);
   }
 
   const actualDone = tasks.filter(t => t.status === "done").length;
-  if (epic.completed_count !== actualDone) {
-    warnings.push(`Epic completed_count (${epic.completed_count}) doesn't match actual (${actualDone})`);
+  if (plan.completed_count !== actualDone) {
+    warnings.push(`Plan completed_count (${plan.completed_count}) doesn't match actual (${actualDone})`);
   }
 
   return {
@@ -570,4 +469,12 @@ export function validateEpic(cwd: string, epicId: string): ValidationResult {
     errors,
     warnings,
   };
+}
+
+// =============================================================================
+// Plan Existence Check
+// =============================================================================
+
+export function hasPlan(cwd: string): boolean {
+  return getPlan(cwd) !== null;
 }

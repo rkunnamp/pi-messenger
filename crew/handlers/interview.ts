@@ -2,6 +2,7 @@
  * Crew - Interview Handler
  * 
  * Generates interview questions for requirement clarification.
+ * Works with current plan's PRD.
  */
 
 import * as fs from "node:fs";
@@ -13,6 +14,7 @@ import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import * as store from "../store.js";
+import { getCrewDir } from "../store.js";
 
 export async function execute(
   params: CrewParams,
@@ -21,14 +23,7 @@ export async function execute(
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
-  const { target, idea } = params;
-
-  if (!target) {
-    return result("Error: target required for interview action (epic ID or feature idea).", {
-      mode: "interview",
-      error: "missing_target"
-    });
-  }
+  const { target } = params;
 
   // Check for interview-generator agent
   const availableAgents = discoverCrewAgents(cwd);
@@ -40,26 +35,27 @@ export async function execute(
     });
   }
 
-  // Determine feature description
+  // Determine feature description from plan or target
   let featureDescription: string;
-  let epicId: string | undefined;
+  const plan = store.getPlan(cwd);
 
-  if (idea) {
+  if (target) {
+    // Use target as feature description
     featureDescription = target;
-  } else {
-    const epic = store.getEpic(cwd, target);
-    if (!epic) {
-      return result(`Error: Epic ${target} not found. Use idea: true for feature ideas.`, {
-        mode: "interview",
-        error: "epic_not_found",
-        target
-      });
+  } else if (plan) {
+    // Use plan's PRD
+    const prdPath = path.isAbsolute(plan.prd) ? plan.prd : path.join(cwd, plan.prd);
+    if (fs.existsSync(prdPath)) {
+      featureDescription = fs.readFileSync(prdPath, "utf-8");
+    } else {
+      const planSpec = store.getPlanSpec(cwd);
+      featureDescription = planSpec ?? `Plan: ${plan.prd}`;
     }
-    epicId = epic.id;
-    const spec = store.getEpicSpec(cwd, epicId);
-    featureDescription = spec && !spec.includes("*Spec pending*")
-      ? `${epic.title}\n\n${spec}`
-      : epic.title;
+  } else {
+    return result("Error: No plan found. Create one first with pi_messenger({ action: \"plan\" }) or provide a target.", {
+      mode: "interview",
+      error: "no_plan"
+    });
   }
 
   // Spawn interview generator
@@ -91,11 +87,11 @@ Follow your output format exactly for question parsing.`
   }
 
   // Write questions to JSON file for pi's interview tool
-  const crewDir = path.join(cwd, ".pi", "messenger", "crew");
+  const crewDir = getCrewDir(cwd);
   const questionsPath = path.join(crewDir, "interview-questions.json");
   
   const questionsJson = {
-    title: `Interview: ${epicId ?? "New Feature"}`,
+    title: `Interview: ${plan?.prd ?? "Feature Clarification"}`,
     questions: questions.map((q, i) => ({
       id: `q${i + 1}`,
       type: q.type,
@@ -122,7 +118,7 @@ Follow your output format exactly for question parsing.`
 
 **Questions:** ${questions.length}
 **File:** ${questionsPath}
-${epicId ? `**Epic:** ${epicId}` : ""}
+${plan ? `**PRD:** ${plan.prd}` : ""}
 
 ## Preview
 
@@ -135,11 +131,11 @@ Run the interview using pi's interview tool:
 interview({ questions: "${questionsPath}" })
 \`\`\`
 
-After completing the interview, use the responses to update the epic spec or create a more detailed plan.`;
+After completing the interview, use the responses to refine task specs or update the plan.`;
 
   return result(text, {
     mode: "interview",
-    epicId,
+    prd: plan?.prd,
     questionCount: questions.length,
     questionsPath,
     questionTypes: {

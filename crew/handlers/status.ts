@@ -1,402 +1,246 @@
 /**
- * Crew - Status Handlers
+ * Crew - Status Handler
  * 
- * Operations: status, validate, agents, install, uninstall
+ * Shows plan progress and task status.
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
-import * as store from "../store.js";
 import { discoverCrewAgents } from "../utils/discover.js";
-import { 
-  installAgents, 
-  uninstallAgents, 
-  checkAgentStatus,
-  getSourceAgentsDir,
-  getTargetAgentsDir,
-} from "../utils/install.js";
+import { ensureAgentsInstalled, uninstallAgents } from "../utils/install.js";
+import * as store from "../store.js";
+import { autonomousState } from "../state.js";
 
+/**
+ * Execute status action - shows plan progress.
+ */
 export async function execute(
+  _params: CrewParams,
+  _state: MessengerState,
+  _dirs: Dirs,
+  ctx: ExtensionContext
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const plan = store.getPlan(cwd);
+
+  if (!plan) {
+    return result(`# Crew Status
+
+**No active plan.**
+
+Create a plan from your PRD:
+  pi_messenger({ action: "plan" })                    # Auto-discovers PRD.md
+  pi_messenger({ action: "plan", prd: "docs/PRD.md" }) # Explicit path`, {
+      mode: "status",
+      hasPlan: false
+    });
+  }
+
+  const tasks = store.getTasks(cwd);
+  const done = tasks.filter(t => t.status === "done");
+  const inProgress = tasks.filter(t => t.status === "in_progress");
+  const blocked = tasks.filter(t => t.status === "blocked");
+  const ready = store.getReadyTasks(cwd);
+  const waiting = tasks.filter(t => 
+    t.status === "todo" && !ready.some(r => r.id === t.id)
+  );
+
+  const pct = tasks.length > 0 ? Math.round((done.length / tasks.length) * 100) : 0;
+
+  let text = `# Crew Status
+
+**Plan:** ${plan.prd}
+**Progress:** ${done.length}/${tasks.length} tasks (${pct}%)
+
+## Tasks
+`;
+
+  if (done.length > 0) {
+    text += `\n✅ **Done**\n`;
+    for (const t of done) {
+      text += `  - ${t.id}: ${t.title}\n`;
+    }
+  }
+
+  if (inProgress.length > 0) {
+    text += `\n🔄 **In Progress**\n`;
+    for (const t of inProgress) {
+      const agent = t.assigned_to ? ` (${t.assigned_to}` : "";
+      const attempt = t.attempt_count > 1 ? `, attempt ${t.attempt_count}` : "";
+      text += `  - ${t.id}: ${t.title}${agent}${attempt}${t.assigned_to ? ")" : ""}\n`;
+    }
+  }
+
+  if (ready.length > 0) {
+    text += `\n⬜ **Ready**\n`;
+    for (const t of ready) {
+      text += `  - ${t.id}: ${t.title}\n`;
+    }
+  }
+
+  if (waiting.length > 0) {
+    text += `\n⏸️ **Waiting** (dependencies not met)\n`;
+    for (const t of waiting) {
+      const deps = t.depends_on.join(", ");
+      text += `  - ${t.id}: ${t.title} → needs: ${deps}\n`;
+    }
+  }
+
+  if (blocked.length > 0) {
+    text += `\n🚫 **Blocked**\n`;
+    for (const t of blocked) {
+      const reason = t.blocked_reason ? ` (${t.blocked_reason.slice(0, 40)}...)` : "";
+      text += `  - ${t.id}: ${t.title}${reason}\n`;
+    }
+  }
+
+  // Add autonomous status if active
+  if (autonomousState.active) {
+    text += `\n## Autonomous Mode\n`;
+    text += `Wave ${autonomousState.waveNumber} running...\n`;
+    if (autonomousState.startedAt) {
+      const startTime = new Date(autonomousState.startedAt).getTime();
+      const elapsedMs = Date.now() - startTime;
+      const minutes = Math.floor(elapsedMs / 60000);
+      const seconds = Math.floor((elapsedMs % 60000) / 1000);
+      text += `Elapsed: ${minutes}:${seconds.toString().padStart(2, "0")}\n`;
+    }
+  }
+
+  // Add next steps
+  text += `\n## Next`;
+  if (done.length === tasks.length) {
+    text += `\n🎉 All tasks complete!`;
+  } else if (ready.length > 0) {
+    text += `\nRun \`pi_messenger({ action: "work" })\` to execute ${ready.map(t => t.id).join(", ")}`;
+  } else if (blocked.length > 0) {
+    text += `\nUnblock tasks with \`pi_messenger({ action: "task.unblock", id: "..." })\``;
+  } else if (inProgress.length > 0) {
+    text += `\nWaiting for in-progress tasks to complete.`;
+  }
+
+  return result(text, {
+    mode: "status",
+    hasPlan: true,
+    prd: plan.prd,
+    progress: { done: done.length, total: tasks.length, pct },
+    tasks: {
+      done: done.map(t => t.id),
+      inProgress: inProgress.map(t => t.id),
+      ready: ready.map(t => t.id),
+      waiting: waiting.map(t => t.id),
+      blocked: blocked.map(t => t.id)
+    },
+    autonomous: autonomousState.active
+  });
+}
+
+/**
+ * Execute crew.* actions (crew.status, crew.agents, crew.install, crew.uninstall)
+ */
+export async function executeCrew(
   op: string,
-  params: CrewParams,
-  state: MessengerState,
+  _params: CrewParams,
+  _state: MessengerState,
   _dirs: Dirs,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
 
   switch (op) {
-    case "status":
-      return crewStatus(cwd, state);
-    case "validate":
-      return crewValidate(cwd, params);
-    case "agents":
-      return crewAgents(cwd);
-    case "install":
-      return crewInstall(params);
-    case "uninstall":
-      return crewUninstall();
-    default:
-      return result(`Unknown crew operation: ${op}`, { mode: "crew", error: "unknown_operation", operation: op });
-  }
-}
+    case "status": {
+      // Same as main status
+      return execute(_params, _state, _dirs, ctx);
+    }
 
-// =============================================================================
-// crew.status
-// =============================================================================
-
-function crewStatus(cwd: string, state: MessengerState) {
-  const epics = store.listEpics(cwd);
-  const agents = discoverCrewAgents(cwd);
-
-  // Gather stats
-  let totalTasks = 0;
-  let doneTasks = 0;
-  let inProgressTasks = 0;
-  let blockedTasks = 0;
-  let todoTasks = 0;
-
-  for (const epic of epics) {
-    const tasks = store.getTasks(cwd, epic.id);
-    for (const task of tasks) {
-      totalTasks++;
-      switch (task.status) {
-        case "done": doneTasks++; break;
-        case "in_progress": inProgressTasks++; break;
-        case "blocked": blockedTasks++; break;
-        case "todo": todoTasks++; break;
+    case "agents": {
+      const agents = discoverCrewAgents(cwd);
+      if (agents.length === 0) {
+        return result("No crew agents found. Run crew.install to set up agents.", {
+          mode: "crew.agents",
+          agents: []
+        });
       }
-    }
-  }
 
-  // Build status text
-  const lines: string[] = ["# Crew Status\n"];
+      const byRole: Record<string, string[]> = {};
+      for (const a of agents) {
+        const role = a.crewRole ?? "other";
+        if (!byRole[role]) byRole[role] = [];
+        byRole[role].push(`${a.name} (${a.model ?? "default"})`);
+      }
 
-  // Agent info
-  lines.push(`**Agent:** ${state.agentName || "not registered"}`);
-  lines.push(`**Crew agents available:** ${agents.length}`);
-  lines.push("");
+      let text = "# Crew Agents\n";
+      for (const [role, names] of Object.entries(byRole)) {
+        text += `\n**${role}s:** ${names.join(", ")}\n`;
+      }
 
-  // Epic summary
-  const activeEpics = epics.filter(e => e.status === "active" || e.status === "planning");
-  const completedEpics = epics.filter(e => e.status === "completed");
-
-  lines.push("## Epics");
-  lines.push(`- **Active:** ${activeEpics.length}`);
-  lines.push(`- **Completed:** ${completedEpics.length}`);
-  lines.push(`- **Total:** ${epics.length}`);
-  lines.push("");
-
-  // Task summary
-  lines.push("## Tasks");
-  lines.push(`- ✅ Done: ${doneTasks}`);
-  lines.push(`- 🔄 In Progress: ${inProgressTasks}`);
-  lines.push(`- 🚫 Blocked: ${blockedTasks}`);
-  lines.push(`- ⬜ To Do: ${todoTasks}`);
-  lines.push(`- **Total:** ${totalTasks}`);
-  
-  if (totalTasks > 0) {
-    const progress = Math.round(doneTasks / totalTasks * 100);
-    lines.push(`- **Progress:** ${progress}%`);
-  }
-  lines.push("");
-
-  // Active epics detail
-  if (activeEpics.length > 0) {
-    lines.push("## Active Epics\n");
-    for (const epic of activeEpics.slice(0, 5)) {
-      const progress = epic.task_count > 0 
-        ? `${epic.completed_count}/${epic.task_count}`
-        : "0 tasks";
-      lines.push(`- **${epic.id}**: ${epic.title} (${progress})`);
-    }
-    if (activeEpics.length > 5) {
-      lines.push(`- *...and ${activeEpics.length - 5} more*`);
-    }
-  }
-
-  return result(lines.join("\n"), {
-    mode: "crew.status",
-    epics: {
-      active: activeEpics.length,
-      completed: completedEpics.length,
-      total: epics.length,
-    },
-    tasks: {
-      done: doneTasks,
-      in_progress: inProgressTasks,
-      blocked: blockedTasks,
-      todo: todoTasks,
-      total: totalTasks,
-    },
-    agents: agents.length,
-  });
-}
-
-// =============================================================================
-// crew.validate
-// =============================================================================
-
-function crewValidate(cwd: string, params: CrewParams) {
-  const epicId = params.id;
-
-  if (epicId) {
-    // Validate specific epic
-    const validation = store.validateEpic(cwd, epicId);
-
-    if (validation.valid && validation.warnings.length === 0) {
-      return result(`✅ Epic ${epicId} is valid with no warnings.`, {
-        mode: "crew.validate",
-        epic: epicId,
-        valid: true,
-        errors: [],
-        warnings: [],
+      return result(text, {
+        mode: "crew.agents",
+        agents: agents.map(a => ({ name: a.name, role: a.crewRole, model: a.model }))
       });
     }
 
-    const lines: string[] = [`# Validation: ${epicId}\n`];
-    
-    if (!validation.valid) {
-      lines.push("## ❌ Errors\n");
-      for (const err of validation.errors) {
-        lines.push(`- ${err}`);
+    case "install": {
+      ensureAgentsInstalled();
+      const agents = discoverCrewAgents(cwd);
+      return result(`✅ Crew agents installed: ${agents.map(a => a.name).join(", ")}`, {
+        mode: "crew.install",
+        installed: agents.map(a => a.name)
+      });
+    }
+
+    case "uninstall": {
+      const { removed, errors } = uninstallAgents();
+      if (errors.length > 0) {
+        return result(`⚠️ Removed ${removed.length} agent(s) with ${errors.length} error(s):\n${errors.join("\n")}`, {
+          mode: "crew.uninstall",
+          removed,
+          errors
+        });
       }
-      lines.push("");
+      return result(`✅ Removed ${removed.length} crew agent(s) from ~/.pi/agent/agents/`, {
+        mode: "crew.uninstall",
+        removed
+      });
     }
 
-    if (validation.warnings.length > 0) {
-      lines.push("## ⚠️ Warnings\n");
-      for (const warn of validation.warnings) {
-        lines.push(`- ${warn}`);
+    case "validate": {
+      const validation = store.validatePlan(cwd);
+      
+      if (validation.valid && validation.warnings.length === 0) {
+        return result("✅ Plan is valid with no warnings.", {
+          mode: "crew.validate",
+          valid: true,
+          errors: [],
+          warnings: []
+        });
       }
-    }
 
-    return result(lines.join("\n"), {
-      mode: "crew.validate",
-      epic: epicId,
-      valid: validation.valid,
-      errors: validation.errors,
-      warnings: validation.warnings,
-    });
-  }
-
-  // Validate all epics
-  const epics = store.listEpics(cwd);
-  if (epics.length === 0) {
-    return result("No epics to validate.", { mode: "crew.validate", results: [] });
-  }
-
-  const results: { id: string; valid: boolean; errors: number; warnings: number }[] = [];
-  let allValid = true;
-  let totalErrors = 0;
-  let totalWarnings = 0;
-
-  for (const epic of epics) {
-    const validation = store.validateEpic(cwd, epic.id);
-    results.push({
-      id: epic.id,
-      valid: validation.valid,
-      errors: validation.errors.length,
-      warnings: validation.warnings.length,
-    });
-    if (!validation.valid) allValid = false;
-    totalErrors += validation.errors.length;
-    totalWarnings += validation.warnings.length;
-  }
-
-  const lines: string[] = ["# Crew Validation\n"];
-  
-  if (allValid && totalWarnings === 0) {
-    lines.push("✅ All epics valid with no warnings.\n");
-  } else {
-    lines.push(`**Errors:** ${totalErrors}  **Warnings:** ${totalWarnings}\n`);
-  }
-
-  for (const r of results) {
-    const icon = r.valid ? (r.warnings > 0 ? "⚠️" : "✅") : "❌";
-    const details = [];
-    if (r.errors > 0) details.push(`${r.errors} errors`);
-    if (r.warnings > 0) details.push(`${r.warnings} warnings`);
-    const detailStr = details.length > 0 ? ` (${details.join(", ")})` : "";
-    lines.push(`${icon} ${r.id}${detailStr}`);
-  }
-
-  return result(lines.join("\n"), {
-    mode: "crew.validate",
-    allValid,
-    totalErrors,
-    totalWarnings,
-    results,
-  });
-}
-
-// =============================================================================
-// crew.agents
-// =============================================================================
-
-function crewAgents(cwd: string) {
-  const agents = discoverCrewAgents(cwd);
-
-  if (agents.length === 0) {
-    return result("No crew agents found.\n\nRun `pi_messenger({ action: \"crew.install\" })` to install crew agents.", {
-      mode: "crew.agents",
-      agents: [],
-    });
-  }
-
-  const lines: string[] = ["# Crew Agents\n"];
-
-  // Group by role
-  const byRole = new Map<string, typeof agents>();
-  for (const agent of agents) {
-    const role = agent.crewRole ?? "worker";
-    if (!byRole.has(role)) byRole.set(role, []);
-    byRole.get(role)!.push(agent);
-  }
-
-  for (const [role, roleAgents] of byRole) {
-    lines.push(`## ${role}\n`);
-    for (const agent of roleAgents) {
-      const model = agent.model ? ` (${agent.model})` : "";
-      lines.push(`- **${agent.name}**${model}`);
-      if (agent.description) {
-        lines.push(`  ${agent.description.slice(0, 100)}${agent.description.length > 100 ? "..." : ""}`);
+      let text = validation.valid ? "✅ Plan is valid" : "❌ Plan has errors";
+      
+      if (validation.errors.length > 0) {
+        text += "\n\n**Errors:**\n" + validation.errors.map(e => `- ${e}`).join("\n");
       }
+      
+      if (validation.warnings.length > 0) {
+        text += "\n\n**Warnings:**\n" + validation.warnings.map(w => `- ${w}`).join("\n");
+      }
+
+      return result(text, {
+        mode: "crew.validate",
+        valid: validation.valid,
+        errors: validation.errors,
+        warnings: validation.warnings
+      });
     }
-    lines.push("");
+
+    default:
+      return result(`Unknown crew operation: ${op}`, {
+        mode: "crew",
+        error: "unknown_operation",
+        operation: op
+      });
   }
-
-  return result(lines.join("\n"), {
-    mode: "crew.agents",
-    agents: agents.map(a => ({
-      name: a.name,
-      role: a.crewRole,
-      model: a.model,
-    })),
-  });
-}
-
-// =============================================================================
-// crew.install
-// =============================================================================
-
-function crewInstall(params: CrewParams) {
-  // Check current status first
-  const status = checkAgentStatus();
-  
-  // If force not specified and everything is current, just report
-  const force = params.reason === "force"; // Using reason param as force flag
-  
-  if (!force && status.missing.length === 0 && status.outdated.length === 0) {
-    return result(`✅ All ${status.current.length} crew agents are up to date.\n\nTarget: ${getTargetAgentsDir()}`, {
-      mode: "crew.install",
-      action: "check",
-      current: status.current.length,
-      missing: 0,
-      outdated: 0,
-    });
-  }
-
-  // Install agents
-  const installResult = installAgents(force);
-  
-  const lines: string[] = ["# Crew Agent Installation\n"];
-  
-  if (installResult.errors.length > 0) {
-    lines.push("## ❌ Errors\n");
-    for (const err of installResult.errors) {
-      lines.push(`- ${err}`);
-    }
-    lines.push("");
-  }
-
-  if (installResult.installed.length > 0) {
-    lines.push("## ✅ Installed\n");
-    for (const agent of installResult.installed) {
-      lines.push(`- ${agent}`);
-    }
-    lines.push("");
-  }
-
-  if (installResult.updated.length > 0) {
-    lines.push("## 🔄 Updated\n");
-    for (const agent of installResult.updated) {
-      lines.push(`- ${agent}`);
-    }
-    lines.push("");
-  }
-
-  if (installResult.skipped.length > 0 && force) {
-    lines.push("## ⏭️ Skipped (already current)\n");
-    for (const agent of installResult.skipped) {
-      lines.push(`- ${agent}`);
-    }
-    lines.push("");
-  }
-
-  lines.push(`**Source:** ${getSourceAgentsDir()}`);
-  lines.push(`**Target:** ${installResult.targetDir}`);
-
-  const success = installResult.errors.length === 0;
-  const summary = success 
-    ? `Installed: ${installResult.installed.length}, Updated: ${installResult.updated.length}`
-    : `Failed with ${installResult.errors.length} error(s)`;
-
-  return result(lines.join("\n"), {
-    mode: "crew.install",
-    success,
-    installed: installResult.installed,
-    updated: installResult.updated,
-    skipped: installResult.skipped,
-    errors: installResult.errors,
-    summary,
-  });
-}
-
-// =============================================================================
-// crew.uninstall
-// =============================================================================
-
-function crewUninstall() {
-  const uninstallResult = uninstallAgents();
-
-  const lines: string[] = ["# Crew Agent Uninstall\n"];
-
-  if (uninstallResult.errors.length > 0) {
-    lines.push("## ❌ Errors\n");
-    for (const err of uninstallResult.errors) {
-      lines.push(`- ${err}`);
-    }
-    lines.push("");
-  }
-
-  if (uninstallResult.removed.length > 0) {
-    lines.push("## 🗑️ Removed\n");
-    for (const agent of uninstallResult.removed) {
-      lines.push(`- ${agent}`);
-    }
-    lines.push("");
-  }
-
-  if (uninstallResult.notFound.length > 0) {
-    lines.push("## ⏭️ Not Found (already removed)\n");
-    for (const agent of uninstallResult.notFound) {
-      lines.push(`- ${agent}`);
-    }
-    lines.push("");
-  }
-
-  lines.push(`**Target:** ${getTargetAgentsDir()}`);
-
-  const success = uninstallResult.errors.length === 0;
-
-  return result(lines.join("\n"), {
-    mode: "crew.uninstall",
-    success,
-    removed: uninstallResult.removed,
-    notFound: uninstallResult.notFound,
-    errors: uninstallResult.errors,
-  });
 }

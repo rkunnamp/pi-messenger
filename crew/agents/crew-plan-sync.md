@@ -2,7 +2,7 @@
 name: crew-plan-sync
 description: Syncs downstream specs after task completion
 tools: read, write, bash, pi_messenger
-model: claude-sonnet-4-20250514
+model: claude-opus-4-5
 crewRole: analyst
 maxOutput: { bytes: 51200, lines: 500 }
 parallel: false
@@ -62,36 +62,3 @@ If no updates needed, explain why.
 - Only update specs, don't change task status
 - Preserve existing spec content, add/update relevant sections
 - Note if implementation deviated from original plan
-```
-
----
-
-## Appendix: Crew Overlay (crew-overlay.ts)
-
-```typescript
-// crew-overlay.ts
-
-import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import type { Epic, Task } from "./crew/types.js";
-import * as crewStore from "./crew/store.js";
-import { autonomousState } from "./crew/state.js";
-
-const STATUS_ICONS: Record<string, string> = {
-  todo: "○",
-  in_progress: "●",
-  done: "✓",
-  blocked: "✗",
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  todo: "dim",
-  in_progress: "accent",
-  done: "success",
-  blocked: "error",
-};
-
-export class CrewOverlay implements Component, Focusable {
-  readonly width = 76;
-  focused = false;

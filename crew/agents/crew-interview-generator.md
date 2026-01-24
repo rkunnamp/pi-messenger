@@ -2,7 +2,7 @@
 name: crew-interview-generator
 description: Generates deep interview questions to refine requirements
 tools: read, bash
-model: claude-sonnet-4-20250514
+model: claude-opus-4-5
 crewRole: analyst
 maxOutput: { bytes: 51200, lines: 500 }
 parallel: false
