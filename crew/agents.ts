@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { discoverCrewAgents, type CrewAgentConfig } from "./utils/discover.js";
 import { truncateOutput, type MaxOutputConfig } from "./utils/truncate.js";
 import {
@@ -25,6 +26,11 @@ import {
 } from "./utils/artifacts.js";
 import { loadCrewConfig, getTruncationForRole, type CrewConfig } from "./utils/config.js";
 import type { AgentTask, AgentResult } from "./types.js";
+
+// Extension directory (parent of crew/) - passed to subagents so they can use pi_messenger
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const EXTENSION_DIR = path.resolve(__dirname, "..");
 
 export interface SpawnOptions {
   onProgress?: (results: AgentResult[]) => void;
@@ -109,6 +115,9 @@ async function runAgent(
     // Build args for pi command
     const args = ["--mode", "json", "--agent", task.agent, "-p", task.task];
     if (agentConfig?.model) args.push("--model", agentConfig.model);
+    
+    // Pass extension so workers can use pi_messenger
+    args.push("--extension", EXTENSION_DIR);
 
     const proc = spawn("pi", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 
