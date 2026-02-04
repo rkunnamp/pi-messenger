@@ -48,11 +48,13 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const state: MessengerState = {
     agentName: process.env.PI_AGENT_NAME || "",
+    sessionId: "",
     registered: false,
     watcher: null,
     watcherRetries: 0,
     watcherRetryTimer: null,
     watcherDebounceTimer: null,
+    pollTimer: null,
     reservations: [],
     chatHistory: new Map(),
     unreadCounts: new Map(),
@@ -126,7 +128,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Add reply hint
     const replyHint = config.replyHint
-      ? ` — reply: pi_messenger({ to: "${msg.from}", message: "..." })`
+      ? ` — reply: pi_messenger({ action: "send", to: "${msg.from}", message: "..." })`
       : "";
 
     content += `**Message from ${msg.from}**${replyHint}\n\n${msg.text}`;
@@ -862,10 +864,16 @@ Mode: action (if provided) > legacy key-based routing`,
       ? ` (in ${folder} on ${c.registration.gitBranch})`
       : ` (in ${folder})`;
 
-    const lines = [path, `Reserved by: ${c.agent}${locationPart}`];
+    const reservedDisp = displaySpecPath(c.reservationPath, process.cwd()) + (c.isDir ? "/" : "");
+
+    const lines = [
+      c.path,
+      `Reserved by: ${c.agent}${locationPart}`,
+      `Reservation: ${reservedDisp}`,
+    ];
     if (c.reason) lines.push(`Reason: "${c.reason}"`);
     lines.push("");
-    lines.push(`Coordinate via pi_messenger({ to: "${c.agent}", message: "..." })`);
+    lines.push(`Coordinate via pi_messenger({ action: "send", to: "${c.agent}", message: "..." })`);
 
     return { block: true, reason: lines.join("\n") };
   });

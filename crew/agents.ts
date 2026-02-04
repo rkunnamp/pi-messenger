@@ -119,7 +119,15 @@ async function runAgent(
     // Pass extension so workers can use pi_messenger
     args.push("--extension", EXTENSION_DIR);
 
-    const proc = spawn("pi", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn("pi", args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // Prevent crew child agents from spawning their own crew orchestration.
+        PI_MESSENGER_CREW_CHILD: "1",
+      },
+    });
 
     let jsonlBuffer = "";
     const events: unknown[] = [];

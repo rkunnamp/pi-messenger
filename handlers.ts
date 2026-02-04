@@ -16,6 +16,8 @@ import {
   truncatePathLeft,
   displaySpecPath,
   resolveSpecPath,
+  normalizeReservationPath,
+  normalizeFsPath,
   computeStatus,
   STATUS_INDICATORS,
   formatDuration,
@@ -44,7 +46,7 @@ function result(text: string, details: Record<string, unknown>) {
 
 export function notRegisteredError() {
   return result(
-    "Not registered. Use pi_messenger({ join: true }) to join the agent mesh first.",
+    "Not registered. Use pi_messenger({ action: \"join\" }) to join the agent mesh first.",
     { mode: "error", error: "not_registered" }
   );
 }
@@ -146,7 +148,11 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
 
   text += `Peers: ${agents.length}\n`;
   if (state.reservations.length > 0) {
-    const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
+    const cwd = process.cwd();
+    const myRes = state.reservations.map(r => {
+      const disp = displaySpecPath(r.path, cwd) + (r.isDir ? "/" : "");
+      return `🔒 ${truncatePathLeft(disp, 40)}`;
+    });
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
   text += `\nUse { list: true } for details, { swarm: true } for task status.`;
@@ -218,7 +224,10 @@ export function executeList(state: MessengerState, dirs: Dirs, config?: { stuckT
     }
 
     if (a.reservations && a.reservations.length > 0) {
-      const resParts = a.reservations.map(r => r.pattern).join(", ");
+      const cwd = process.cwd();
+      const resParts = a.reservations
+        .map(r => displaySpecPath(r.path, cwd) + (r.isDir ? "/" : ""))
+        .join(", ");
       parts.push(`\u{1F4C1} ${resParts}`);
     }
 
@@ -317,8 +326,10 @@ export function executeSend(
       continue;
     }
 
+    const target = validation.registration;
+
     try {
-      store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+      store.sendMessageToAgent(state, dirs, target, message, replyTo);
       sent.push(recipient);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "write failed";
@@ -365,25 +376,31 @@ export function executeReserve(
 
   if (patterns.length === 0) {
     return result(
-      "Error: at least one pattern required.",
+      "Error: at least one path required.",
       { mode: "reserve", error: "empty_patterns" }
     );
   }
 
+  const cwd = ctx.cwd ?? process.cwd();
   const now = new Date().toISOString();
 
-  for (const pattern of patterns) {
-    state.reservations = state.reservations.filter(r => r.pattern !== pattern);
-    state.reservations.push({ pattern, reason, since: now });
+  const reservedDisplay: string[] = [];
+
+  for (const input of patterns) {
+    const norm = normalizeReservationPath(input, cwd);
+
+    // De-dupe by normalized key
+    state.reservations = state.reservations.filter(r => !(r.path === norm.path && r.isDir === norm.isDir));
+    state.reservations.push({ path: norm.path, isDir: norm.isDir, reason, since: now });
+
+    const disp = displaySpecPath(norm.path, cwd) + (norm.isDir ? "/" : "");
+    reservedDisplay.push(disp);
+    logFeedEvent(dirs, state.agentName, "reserve", disp, reason);
   }
 
   store.updateRegistration(state, dirs, ctx);
 
-  for (const pattern of patterns) {
-    logFeedEvent(dirs, state.agentName, "reserve", pattern, reason);
-  }
-
-  return result(`Reserved: ${patterns.join(", ")}`, { mode: "reserve", patterns, reason });
+  return result(`Reserved: ${reservedDisplay.join(", ")}`, { mode: "reserve", paths: reservedDisplay, reason });
 }
 
 export function executeRelease(
@@ -396,12 +413,14 @@ export function executeRelease(
     return notRegisteredError();
   }
 
+  const cwd = ctx.cwd ?? process.cwd();
+
   if (release === true) {
-    const released = state.reservations.map(r => r.pattern);
+    const released = state.reservations.map(r => displaySpecPath(r.path, cwd) + (r.isDir ? "/" : ""));
     state.reservations = [];
     store.updateRegistration(state, dirs, ctx);
-    for (const pattern of released) {
-      logFeedEvent(dirs, state.agentName, "release", pattern);
+    for (const disp of released) {
+      logFeedEvent(dirs, state.agentName, "release", disp);
     }
     return result(
       released.length > 0 ? `Released all: ${released.join(", ")}` : "No reservations to release.",
@@ -409,16 +428,24 @@ export function executeRelease(
     );
   }
 
-  const patterns = release;
-  const releasedPatterns = state.reservations.filter(r => patterns.includes(r.pattern)).map(r => r.pattern);
-  state.reservations = state.reservations.filter(r => !patterns.includes(r.pattern));
+  const inputs = release;
+  const normalized = inputs.map(p => normalizeReservationPath(p, cwd));
+
+  const released: string[] = [];
+  state.reservations = state.reservations.filter(r => {
+    const match = normalized.some(n => n.path === r.path && n.isDir === r.isDir);
+    if (match) {
+      released.push(displaySpecPath(r.path, cwd) + (r.isDir ? "/" : ""));
+    }
+    return !match;
+  });
 
   store.updateRegistration(state, dirs, ctx);
-  for (const pattern of releasedPatterns) {
-    logFeedEvent(dirs, state.agentName, "release", pattern);
+  for (const disp of released) {
+    logFeedEvent(dirs, state.agentName, "release", disp);
   }
 
-  return result(`Released ${releasedPatterns.length} reservation(s).`, { mode: "release", released: releasedPatterns });
+  return result(`Released ${released.length} reservation(s).`, { mode: "release", released });
 }
 
 export function executeRename(
@@ -854,9 +881,11 @@ function formatWhoisOutput(
   }
 
   if (agent.reservations && agent.reservations.length > 0) {
+    const cwd = process.cwd();
     lines.push("", "## Reservations");
     for (const r of agent.reservations) {
-      lines.push(`- ${r.pattern}${r.reason ? ` (${r.reason})` : ""}`);
+      const disp = displaySpecPath(r.path, cwd) + (r.isDir ? "/" : "");
+      lines.push(`- ${disp}${r.reason ? ` (${r.reason})` : ""}`);
     }
   }
 

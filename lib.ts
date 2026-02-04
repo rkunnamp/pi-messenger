@@ -3,14 +3,21 @@
  */
 
 import type * as fs from "node:fs";
-import { basename, isAbsolute, resolve, relative } from "node:path";
+import { basename, isAbsolute, resolve, relative, normalize, sep } from "node:path";
 
 // =============================================================================
 // Types
 // =============================================================================
 
+/**
+ * A file reservation is always stored as a normalized absolute path.
+ *
+ * - isDir=true means "everything under this directory".
+ * - isDir=false means "this exact file".
+ */
 export interface FileReservation {
-  pattern: string;
+  path: string;
+  isDir: boolean;
   reason?: string;
   since: string;
 }
@@ -55,32 +62,44 @@ export interface AgentMailMessage {
 export interface ReservationConflict {
   path: string;
   agent: string;
-  pattern: string;
+  reservationPath: string;
+  isDir: boolean;
   reason?: string;
   registration: AgentRegistration;
 }
 
 export interface MessengerState {
   agentName: string;
+  /** Stable per-process identifier, used for inbox routing */
+  sessionId: string;
   registered: boolean;
+
   watcher: fs.FSWatcher | null;
   watcherRetries: number;
   watcherRetryTimer: ReturnType<typeof setTimeout> | null;
   watcherDebounceTimer: ReturnType<typeof setTimeout> | null;
+
+  /** Polling fallback if fs.watch is unreliable */
+  pollTimer: ReturnType<typeof setInterval> | null;
+
   reservations: FileReservation[];
   chatHistory: Map<string, AgentMailMessage[]>;
   unreadCounts: Map<string, number>;
   broadcastHistory: AgentMailMessage[];
+  /** name -> last seen sessionId */
   seenSenders: Map<string, string>;
+
   model: string;
   gitBranch?: string;
   spec?: string;
   scopeToFolder: boolean;
   isHuman: boolean;
+
   session: AgentSession;
   activity: AgentActivity;
   statusMessage?: string;
   customStatus: boolean;
+
   registryFlushTimer: ReturnType<typeof setTimeout> | null;
   sessionStartedAt: string;
 }
@@ -124,24 +143,22 @@ export function computeStatus(
   thresholdMs: number
 ): ComputedStatus {
   const elapsed = Date.now() - new Date(lastActivityAt).getTime();
-  if (isNaN(elapsed) || elapsed < 0) {
-    return { status: "active" };
-  }
+  if (isNaN(elapsed) || elapsed < 0) return { status: "active" };
+
   const ACTIVE_MS = 30_000;
   const IDLE_MS = 5 * 60_000;
 
-  if (elapsed < ACTIVE_MS) {
-    return { status: "active" };
-  }
-  if (elapsed < IDLE_MS) {
-    return { status: "idle", idleFor: formatDuration(elapsed) };
-  }
+  if (elapsed < ACTIVE_MS) return { status: "active" };
+  if (elapsed < IDLE_MS) return { status: "idle", idleFor: formatDuration(elapsed) };
+
   if (!hasTask && !hasReservation) {
     return { status: "away", idleFor: formatDuration(elapsed) };
   }
+
   if (elapsed >= thresholdMs) {
     return { status: "stuck", idleFor: formatDuration(elapsed) };
   }
+
   return { status: "idle", idleFor: formatDuration(elapsed) };
 }
 
@@ -172,30 +189,13 @@ export interface AutoStatusContext {
 export function generateAutoStatus(ctx: AutoStatusContext): string | undefined {
   const sessionAge = Date.now() - new Date(ctx.sessionStartedAt).getTime();
 
-  if (sessionAge < 30_000) {
-    return "just arrived";
-  }
+  if (sessionAge < 30_000) return "just arrived";
+  if (ctx.recentCommit) return "just shipped";
+  if (ctx.recentTestRuns >= 3) return "debugging...";
+  if (ctx.recentEdits >= 8) return "on fire \u{1F525}";
 
-  if (ctx.recentCommit) {
-    return "just shipped";
-  }
-
-  if (ctx.recentTestRuns >= 3) {
-    return "debugging...";
-  }
-
-  if (ctx.recentEdits >= 8) {
-    return "on fire \u{1F525}";
-  }
-
-  if (ctx.currentActivity?.startsWith("reading")) {
-    return "exploring the codebase";
-  }
-
-  if (ctx.currentActivity?.startsWith("editing")) {
-    return "deep in thought";
-  }
-
+  if (ctx.currentActivity?.startsWith("reading")) return "exploring the codebase";
+  if (ctx.currentActivity?.startsWith("editing")) return "deep in thought";
   return undefined;
 }
 
@@ -207,50 +207,172 @@ export const MAX_WATCHER_RETRIES = 5;
 export const MAX_CHAT_HISTORY = 50;
 
 const AGENT_COLORS = [
-  "38;2;178;129;214",  // purple
-  "38;2;215;135;175",  // pink  
-  "38;2;254;188;56",   // gold
-  "38;2;137;210;129",  // green
-  "38;2;0;175;175",    // cyan
-  "38;2;23;143;185",   // blue
-  "38;2;228;192;15",   // yellow
-  "38;2;255;135;135",  // coral
+  "38;2;178;129;214", // purple
+  "38;2;215;135;175", // pink
+  "38;2;254;188;56", // gold
+  "38;2;137;210;129", // green
+  "38;2;0;175;175", // cyan
+  "38;2;23;143;185", // blue
+  "38;2;228;192;15", // yellow
+  "38;2;255;135;135", // coral
 ];
 
 const DEFAULT_ADJECTIVES = [
-  "Swift", "Bright", "Calm", "Dark", "Epic", "Fast", "Gold", "Happy",
-  "Iron", "Jade", "Keen", "Loud", "Mint", "Nice", "Oak", "Pure",
-  "Quick", "Red", "Sage", "True", "Ultra", "Vivid", "Wild", "Young", "Zen"
+  "Swift",
+  "Bright",
+  "Calm",
+  "Dark",
+  "Epic",
+  "Fast",
+  "Gold",
+  "Happy",
+  "Iron",
+  "Jade",
+  "Keen",
+  "Loud",
+  "Mint",
+  "Nice",
+  "Oak",
+  "Pure",
+  "Quick",
+  "Red",
+  "Sage",
+  "True",
+  "Ultra",
+  "Vivid",
+  "Wild",
+  "Young",
+  "Zen",
 ];
 
 const DEFAULT_NOUNS = [
-  "Arrow", "Bear", "Castle", "Dragon", "Eagle", "Falcon", "Grove", "Hawk",
-  "Ice", "Jaguar", "Knight", "Lion", "Moon", "Nova", "Owl", "Phoenix",
-  "Quartz", "Raven", "Storm", "Tiger", "Union", "Viper", "Wolf", "Xenon", "Yak", "Zenith"
+  "Arrow",
+  "Bear",
+  "Castle",
+  "Dragon",
+  "Eagle",
+  "Falcon",
+  "Grove",
+  "Hawk",
+  "Ice",
+  "Jaguar",
+  "Knight",
+  "Lion",
+  "Moon",
+  "Nova",
+  "Owl",
+  "Phoenix",
+  "Quartz",
+  "Raven",
+  "Storm",
+  "Tiger",
+  "Union",
+  "Viper",
+  "Wolf",
+  "Xenon",
+  "Yak",
+  "Zenith",
 ];
 
 const NATURE_ADJECTIVES = [
-  "Oak", "River", "Mountain", "Cedar", "Storm", "Meadow", "Frost", "Coral",
-  "Willow", "Stone", "Ember", "Moss", "Tide", "Fern", "Cloud", "Pine"
+  "Oak",
+  "River",
+  "Mountain",
+  "Cedar",
+  "Storm",
+  "Meadow",
+  "Frost",
+  "Coral",
+  "Willow",
+  "Stone",
+  "Ember",
+  "Moss",
+  "Tide",
+  "Fern",
+  "Cloud",
+  "Pine",
 ];
 const NATURE_NOUNS = [
-  "Tree", "Stone", "Wind", "Brook", "Peak", "Valley", "Lake", "Ridge",
-  "Creek", "Glade", "Fox", "Heron", "Sage", "Thorn", "Dawn", "Dusk"
+  "Tree",
+  "Stone",
+  "Wind",
+  "Brook",
+  "Peak",
+  "Valley",
+  "Lake",
+  "Ridge",
+  "Creek",
+  "Glade",
+  "Fox",
+  "Heron",
+  "Sage",
+  "Thorn",
+  "Dawn",
+  "Dusk",
 ];
 
 const SPACE_ADJECTIVES = [
-  "Nova", "Lunar", "Cosmic", "Solar", "Stellar", "Astral", "Nebula", "Orbit",
-  "Pulse", "Quasar", "Void", "Zenith", "Aurora", "Comet", "Warp", "Ion"
+  "Nova",
+  "Lunar",
+  "Cosmic",
+  "Solar",
+  "Stellar",
+  "Astral",
+  "Nebula",
+  "Orbit",
+  "Pulse",
+  "Quasar",
+  "Void",
+  "Zenith",
+  "Aurora",
+  "Comet",
+  "Warp",
+  "Ion",
 ];
 const SPACE_NOUNS = [
-  "Star", "Dust", "Ray", "Flare", "Drift", "Core", "Ring", "Gate",
-  "Spark", "Beam", "Wave", "Shard", "Forge", "Bolt", "Glow", "Arc"
+  "Star",
+  "Dust",
+  "Ray",
+  "Flare",
+  "Drift",
+  "Core",
+  "Ring",
+  "Gate",
+  "Spark",
+  "Beam",
+  "Wave",
+  "Shard",
+  "Forge",
+  "Bolt",
+  "Glow",
+  "Arc",
 ];
 
 const MINIMAL_NAMES = [
-  "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
-  "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
-  "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"
+  "Alpha",
+  "Beta",
+  "Gamma",
+  "Delta",
+  "Epsilon",
+  "Zeta",
+  "Eta",
+  "Theta",
+  "Iota",
+  "Kappa",
+  "Lambda",
+  "Mu",
+  "Nu",
+  "Xi",
+  "Omicron",
+  "Pi",
+  "Rho",
+  "Sigma",
+  "Tau",
+  "Upsilon",
+  "Phi",
+  "Chi",
+  "Psi",
+  "Omega",
 ];
 
 export interface NameThemeConfig {
@@ -321,33 +443,37 @@ export function formatRelativeTime(timestamp: string): string {
   return "just now";
 }
 
-export function pathMatchesReservation(filePath: string, pattern: string): boolean {
-  if (pattern.endsWith("/")) {
-    return filePath.startsWith(pattern) || filePath + "/" === pattern;
-  }
-  return filePath === pattern;
-}
-
 export function stripAnsiCodes(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
-const colorCache = new Map<string, string>();
+// =============================================================================
+// Paths & Reservations
+// =============================================================================
 
-export function agentColorCode(name: string): string {
-  const cached = colorCache.get(name);
-  if (cached) return cached;
-
-  let hash = 0;
-  for (const char of name) hash = ((hash << 5) - hash) + char.charCodeAt(0);
-  const color = AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length];
-  colorCache.set(name, color);
-  return color;
+/** Normalize to absolute path, collapse '.', '..', and normalize separators. */
+export function normalizeFsPath(inputPath: string, cwd: string): string {
+  const resolved = isAbsolute(inputPath) ? inputPath : resolve(cwd, inputPath);
+  // normalize and make it stable (POSIX separators) for string matching
+  const normalized = normalize(resolved);
+  return normalized.replace(/\\/g, "/");
 }
 
-export function coloredAgentName(name: string): string {
-  return `\x1b[${agentColorCode(name)}m${name}\x1b[0m`;
+export function normalizeReservationPath(input: string, cwd: string): { path: string; isDir: boolean } {
+  const trimmed = input.trim();
+  const isDir = trimmed.endsWith("/") || trimmed.endsWith(sep);
+  const withoutTrailing = trimmed.replace(/[\\/]+$/, "");
+  return { path: normalizeFsPath(withoutTrailing, cwd), isDir };
+}
+
+export function reservationMatches(fileAbsPath: string, reservation: FileReservation): boolean {
+  if (!fileAbsPath) return false;
+  if (reservation.isDir) {
+    const prefix = reservation.path.endsWith("/") ? reservation.path : reservation.path + "/";
+    return fileAbsPath === reservation.path || fileAbsPath.startsWith(prefix);
+  }
+  return fileAbsPath === reservation.path;
 }
 
 export function extractFolder(cwd: string): string {
@@ -374,20 +500,45 @@ export function displaySpecPath(absPath: string, cwd: string): string {
 
 export function truncatePathLeft(filePath: string, maxLen: number): string {
   if (filePath.length <= maxLen) return filePath;
-  if (maxLen <= 1) return '…';
+  if (maxLen <= 1) return "…";
   const truncated = filePath.slice(-(maxLen - 1));
-  const slashIdx = truncated.indexOf('/');
+  const slashIdx = truncated.indexOf("/");
   if (slashIdx > 0) {
-    return '…' + truncated.slice(slashIdx);
+    return "…" + truncated.slice(slashIdx);
   }
-  return '…' + truncated;
+  return "…" + truncated;
 }
+
+// =============================================================================
+// Coloring
+// =============================================================================
+
+const colorCache = new Map<string, string>();
+
+export function agentColorCode(name: string): string {
+  const cached = colorCache.get(name);
+  if (cached) return cached;
+
+  let hash = 0;
+  for (const char of name) hash = (hash << 5) - hash + char.charCodeAt(0);
+  const color = AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length];
+  colorCache.set(name, color);
+  return color;
+}
+
+export function coloredAgentName(name: string): string {
+  return `\x1b[${agentColorCode(name)}m${name}\x1b[0m`;
+}
+
+// =============================================================================
+// Self Representation
+// =============================================================================
 
 export function buildSelfRegistration(state: MessengerState): AgentRegistration {
   return {
     name: state.agentName,
     pid: process.pid,
-    sessionId: "",
+    sessionId: state.sessionId,
     cwd: process.cwd(),
     model: state.model,
     startedAt: state.sessionStartedAt,
@@ -411,23 +562,21 @@ export function agentHasTask(
       if (claim.agent === name) return true;
     }
   }
-  return crewTasks.some(t => t.assigned_to === name && t.status === "in_progress");
+  return crewTasks.some((t) => t.assigned_to === name && t.status === "in_progress");
 }
 
 export type DisplayMode = "same-folder-branch" | "same-folder" | "different";
 
 export function getDisplayMode(agents: AgentRegistration[]): DisplayMode {
   if (agents.length === 0) return "different";
-  
-  const folders = agents.map(a => extractFolder(a.cwd));
+
+  const folders = agents.map((a) => extractFolder(a.cwd));
   const uniqueFolders = new Set(folders);
-  
   if (uniqueFolders.size > 1) return "different";
-  
-  const branches = agents.map(a => a.gitBranch).filter(Boolean);
+
+  const branches = agents.map((a) => a.gitBranch).filter(Boolean);
   const uniqueBranches = new Set(branches);
-  
   if (uniqueBranches.size <= 1) return "same-folder-branch";
-  
+
   return "same-folder";
 }

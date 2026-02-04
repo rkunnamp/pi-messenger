@@ -5,12 +5,14 @@
  * Simplified: works on current plan's tasks
  */
 
+import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams, AppendEntryFn, Task } from "../types.js";
 import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
 import { loadCrewConfig } from "../utils/config.js";
+import { acquireLock } from "../utils/lock.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import * as store from "../store.js";
 import { getCrewDir } from "../store.js";
@@ -24,10 +26,26 @@ export async function execute(
   appendEntry: AppendEntryFn
 ) {
   const cwd = ctx.cwd ?? process.cwd();
-  const config = loadCrewConfig(getCrewDir(cwd));
-  const { autonomous, concurrency: concurrencyOverride } = params;
+  const crewDir = getCrewDir(cwd);
 
-  // Verify plan exists
+  const lock = await acquireLock(path.join(crewDir, "work.lock"), {
+    retries: 30,
+    retryDelayMs: 100,
+    staleMs: 10 * 60_000,
+  });
+
+  if (!lock.acquired) {
+    return result(
+      `Work wave already running (PID ${lock.holderPid ?? "unknown"}). Try again shortly.`,
+      { mode: "work", error: "locked", holderPid: lock.holderPid }
+    );
+  }
+
+  try {
+    const config = loadCrewConfig(crewDir);
+    const { autonomous, concurrency: concurrencyOverride } = params;
+
+    // Verify plan exists
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("No plan found. Create one first:\n\n  pi_messenger({ action: \"plan\" })\n  pi_messenger({ action: \"plan\", prd: \"path/to/PRD.md\" })", {
@@ -212,6 +230,9 @@ ${autonomous && nextReady.length > 0 ? "Autonomous mode: Continuing to next wave
     nextReady: nextReady.map(t => t.id),
     autonomous: !!autonomous
   });
+  } finally {
+    lock.release();
+  }
 }
 
 // =============================================================================

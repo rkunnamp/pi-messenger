@@ -74,6 +74,15 @@ export async function executeCrewAction(
     return handlers.notRegisteredError();
   }
 
+  // Prevent nested orchestration: crew child agents should not spawn more crew agents.
+  const isCrewChild = process.env.PI_MESSENGER_CREW_CHILD === "1";
+  if (isCrewChild && ["plan", "work", "review", "interview", "sync", "crew"].includes(group)) {
+    return result(
+      `Crew orchestration is disabled inside crew child agents (action: ${action}).`,
+      { mode: "error", error: "crew_child_forbidden", action }
+    );
+  }
+
   switch (group) {
     // ═══════════════════════════════════════════════════════════════════════
     // Coordination actions (delegate to existing handlers)

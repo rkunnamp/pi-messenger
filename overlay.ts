@@ -250,7 +250,7 @@ export class MessengerOverlay implements Component, Focusable {
     if (isBroadcast || (this.selectedAgent === null && !targetAgent) || this.selectedAgent === AGENTS_TAB) {
       for (const agent of agents) {
         try {
-          store.sendMessageToAgent(this.state, this.dirs, agent.name, text);
+          store.sendMessageToAgent(this.state, this.dirs, agent, text);
         } catch {
           // Ignore
         }
@@ -276,8 +276,11 @@ export class MessengerOverlay implements Component, Focusable {
       const recipient = targetAgent ?? this.selectedAgent;
       if (!recipient || recipient === AGENTS_TAB || recipient === CREW_TAB) return;
 
+      const recipientReg = agents.find(a => a.name === recipient);
+      if (!recipientReg) return;
+
       try {
-        const msg = store.sendMessageToAgent(this.state, this.dirs, recipient, text);
+        const msg = store.sendMessageToAgent(this.state, this.dirs, recipientReg, text);
         let history = this.state.chatHistory.get(recipient);
         if (!history) {
           history = [];
@@ -519,7 +522,12 @@ export class MessengerOverlay implements Component, Focusable {
       const tokens = a.session?.tokens ?? 0;
       detailParts.push(tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`);
       if (a.reservations && a.reservations.length > 0) {
-        detailParts.push(`\u{1F4C1} ${a.reservations.map(r => r.pattern).join(", ")}`);
+        const cwd = process.cwd();
+        detailParts.push(
+          `\u{1F4C1} ${a.reservations
+            .map(r => displaySpecPath(r.path, cwd) + (r.isDir ? "/" : ""))
+            .join(", ")}`
+        );
       }
       if (a.statusMessage) {
         detailParts.push(a.statusMessage);
@@ -578,8 +586,10 @@ export class MessengerOverlay implements Component, Focusable {
         details.push(infoParts.join(" • "));
 
         if (agent.reservations && agent.reservations.length > 0) {
+          const cwd = process.cwd();
           for (const r of agent.reservations) {
-            details.push(`🔒 ${truncatePathLeft(r.pattern, 40)}`);
+            const disp = displaySpecPath(r.path, cwd) + (r.isDir ? "/" : "");
+            details.push(`🔒 ${truncatePathLeft(disp, 40)}`);
           }
         }
       }

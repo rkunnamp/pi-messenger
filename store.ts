@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
@@ -24,7 +24,8 @@ import {
   isProcessAlive,
   generateMemorableName,
   isValidAgentName,
-  pathMatchesReservation,
+  normalizeFsPath,
+  reservationMatches,
 } from "./lib.js";
 import { logFeedEvent } from "./feed.js";
 
@@ -66,6 +67,28 @@ function ensureDirSync(dir: string): void {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
+
+function writeFileAtomic(filePath: string, content: string): void {
+  const dir = dirname(filePath);
+  ensureDirSync(dir);
+  const base = basename(filePath);
+  const tmp = join(dir, `.${base}.tmp-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(tmp, content, "utf-8");
+  fs.renameSync(tmp, filePath);
+}
+
+function writeJsonAtomic(filePath: string, data: unknown): void {
+  writeFileAtomic(filePath, JSON.stringify(data, null, 2));
+}
+
+function safeRmDir(dirPath: string): void {
+  try {
+    if (fs.existsSync(dirPath)) fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
 
 function getGitBranch(cwd: string): string | undefined {
   try {
@@ -214,6 +237,10 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
         } catch {
           // Ignore cleanup errors
         }
+        // Best-effort cleanup of the dead agent inbox
+        if (reg.sessionId) {
+          safeRmDir(join(dirs.inbox, reg.sessionId));
+        }
         continue;
       }
 
@@ -226,6 +253,25 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
       if (reg.isHuman === undefined) {
         reg.isHuman = false;
       }
+
+      // Sanitize reservations (defensive against partially-written/old/corrupt files)
+      if (Array.isArray((reg as any).reservations)) {
+        const cleaned: any[] = [];
+        for (const r of (reg as any).reservations) {
+          if (!r || typeof r !== "object") continue;
+          if (typeof (r as any).path !== "string") continue;
+          cleaned.push({
+            path: (r as any).path,
+            isDir: !!(r as any).isDir,
+            reason: typeof (r as any).reason === "string" ? (r as any).reason : undefined,
+            since: typeof (r as any).since === "string" ? (r as any).since : reg.startedAt,
+          });
+        }
+        (reg as any).reservations = cleaned.length > 0 ? cleaned : undefined;
+      } else {
+        delete (reg as any).reservations;
+      }
+
       allAgents.push(reg);
     } catch {
       // Ignore malformed registrations
@@ -279,6 +325,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
   if (state.registered) return true;
 
   ensureDirSync(dirs.registry);
+  state.sessionId = ctx.sessionManager.getSessionId();
 
   if (!state.agentName) {
     state.agentName = generateMemorableName(nameTheme);
@@ -337,7 +384,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     const registration: AgentRegistration = {
       name: state.agentName,
       pid: process.pid,
-      sessionId: ctx.sessionManager.getSessionId(),
+      sessionId: state.sessionId,
       cwd: process.cwd(),
       model: ctx.model?.id ?? "unknown",
       startedAt: now,
@@ -349,7 +396,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     };
 
     try {
-      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
+      writeJsonAtomic(regPath, registration);
     } catch (err) {
       if (ctx.hasUI) {
         const msg = err instanceof Error ? err.message : "unknown error";
@@ -427,7 +474,7 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Exten
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    writeJsonAtomic(regPath, reg);
   } catch {
     // Ignore errors
   }
@@ -447,7 +494,7 @@ export function flushActivityToRegistry(state: MessengerState, dirs: Dirs, ctx: 
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    writeJsonAtomic(regPath, reg);
   } catch {
     // Ignore errors
   }
@@ -461,6 +508,12 @@ export function unregister(state: MessengerState, dirs: Dirs): void {
   } catch {
     // Ignore errors
   }
+
+  // Best-effort cleanup of our inbox (it is keyed by sessionId)
+  if (state.sessionId) {
+    safeRmDir(join(dirs.inbox, state.sessionId));
+  }
+
   state.registered = false;
   invalidateAgentsCache();
 }
@@ -502,59 +555,50 @@ export function renameAgent(
 
   const oldName = state.agentName;
   const oldRegPath = getRegistrationPath(state, dirs);
-  const oldInbox = getMyInbox(state, dirs);
-  const newInbox = join(dirs.inbox, newName);
 
   processAllPendingMessages(state, dirs, deliverFn);
 
+  // Keep the same sessionId/inbox; rename should not move mailboxes.
   const gitBranch = getGitBranch(process.cwd());
   const now = new Date().toISOString();
+
+  // Prefer preserving original session start time for stable presence.
+  const startedAt = state.sessionStartedAt || now;
+
   const registration: AgentRegistration = {
     name: newName,
     pid: process.pid,
-    sessionId: ctx.sessionManager.getSessionId(),
+    sessionId: state.sessionId,
     cwd: process.cwd(),
-    model: ctx.model?.id ?? "unknown",
-    startedAt: now,
+    model: ctx.model?.id ?? state.model ?? "unknown",
+    startedAt,
     reservations: state.reservations.length > 0 ? state.reservations : undefined,
     gitBranch,
     spec: state.spec,
     isHuman: state.isHuman,
     session: { ...state.session },
-    activity: { lastActivityAt: now },
+    activity: { ...state.activity },
     statusMessage: state.statusMessage,
   };
 
   ensureDirSync(dirs.registry);
-  
+
   try {
-    fs.writeFileSync(join(dirs.registry, `${newName}.json`), JSON.stringify(registration, null, 2));
-  } catch (err) {
+    writeJsonAtomic(newRegPath, registration);
+  } catch {
     return { success: false, error: "invalid_name" as const };
   }
 
   // Verify we own the new registration (guards against race condition)
-  let verified = false;
-  let verifyError = false;
   try {
     const written: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
-    verified = written.pid === process.pid;
-  } catch {
-    verifyError = true;
-  }
-
-  if (!verified) {
-    // Clean up our write attempt if file still contains our data (I/O error case)
-    if (verifyError) {
-      try {
-        const checkReg: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
-        if (checkReg.pid === process.pid) {
-          fs.unlinkSync(newRegPath);
-        }
-      } catch {
-        // Best effort cleanup
-      }
+    if (written.pid !== process.pid) {
+      try { fs.unlinkSync(newRegPath); } catch { /* ignore */ }
+      return { success: false, error: "race_lost" };
     }
+  } catch {
+    // If we can't verify, treat as race and clean up best-effort
+    try { fs.unlinkSync(newRegPath); } catch { /* ignore */ }
     return { success: false, error: "race_lost" };
   }
 
@@ -565,33 +609,9 @@ export function renameAgent(
   }
 
   state.agentName = newName;
-
-  if (fs.existsSync(newInbox)) {
-    try {
-      const staleFiles = fs.readdirSync(newInbox).filter(f => f.endsWith(".json"));
-      for (const file of staleFiles) {
-        try {
-          fs.unlinkSync(join(newInbox, file));
-        } catch {
-          // Ignore
-        }
-      }
-    } catch {
-      // Ignore
-    }
-  }
-  ensureDirSync(newInbox);
-
-  try {
-    fs.rmdirSync(oldInbox);
-  } catch {
-    // Ignore - might have new messages or not exist
-  }
-
-  state.model = ctx.model?.id ?? "unknown";
   state.gitBranch = gitBranch;
-  state.sessionStartedAt = now;
   state.activity.lastActivityAt = now;
+
   invalidateAgentsCache();
   return { success: true, oldName, newName };
 }
@@ -603,17 +623,19 @@ export function getConflictsWithOtherAgents(
 ): ReservationConflict[] {
   const conflicts: ReservationConflict[] = [];
   const agents = getActiveAgents(state, dirs);
+  const fileAbs = normalizeFsPath(filePath, process.cwd());
 
   for (const agent of agents) {
     if (!agent.reservations) continue;
     for (const res of agent.reservations) {
-      if (pathMatchesReservation(filePath, res.pattern)) {
+      if (reservationMatches(fileAbs, res)) {
         conflicts.push({
-          path: filePath,
+          path: fileAbs,
           agent: agent.name,
-          pattern: res.pattern,
+          reservationPath: res.path,
+          isDir: res.isDir,
           reason: res.reason,
-          registration: agent
+          registration: agent,
         });
       }
     }
@@ -927,7 +949,7 @@ export async function completeTask(
 // =============================================================================
 
 export function getMyInbox(state: MessengerState, dirs: Dirs): string {
-  return join(dirs.inbox, state.agentName);
+  return join(dirs.inbox, state.sessionId);
 }
 
 export function processAllPendingMessages(
@@ -964,11 +986,20 @@ export function processAllPendingMessages(
         deliverFn(msg);
         fs.unlinkSync(msgPath);
       } catch {
-        // On any failure (read, parse, deliver), delete to avoid infinite retry loops
+        // On any failure (read, parse, deliver), quarantine to avoid infinite retry loops
+        // while preserving the payload for debugging.
         try {
-          fs.unlinkSync(msgPath);
+          const deadletter = join(inbox, ".deadletter");
+          ensureDirSync(deadletter);
+          const dest = join(deadletter, `${file}.bad-${Date.now()}`);
+          fs.renameSync(msgPath, dest);
         } catch {
-          // Already gone or can't delete
+          // Fall back to delete if we can't quarantine
+          try {
+            fs.unlinkSync(msgPath);
+          } catch {
+            // Already gone or can't delete
+          }
         }
       }
     }
@@ -987,25 +1018,31 @@ export function processAllPendingMessages(
 export function sendMessageToAgent(
   state: MessengerState,
   dirs: Dirs,
-  to: string,
+  recipient: AgentRegistration,
   text: string,
   replyTo?: string
 ): AgentMailMessage {
-  const targetInbox = join(dirs.inbox, to);
+  if (!recipient.sessionId) {
+    throw new Error(`Cannot deliver message to ${recipient.name}: missing sessionId`);
+  }
+
+  const targetInbox = join(dirs.inbox, recipient.sessionId);
   ensureDirSync(targetInbox);
 
   const msg: AgentMailMessage = {
     id: randomUUID(),
     from: state.agentName,
-    to,
+    to: recipient.name,
     text,
     timestamp: new Date().toISOString(),
-    replyTo: replyTo ?? null
+    replyTo: replyTo ?? null,
   };
 
   const random = Math.random().toString(36).substring(2, 8);
   const msgFile = join(targetInbox, `${Date.now()}-${random}.json`);
-  fs.writeFileSync(msgFile, JSON.stringify(msg, null, 2));
+  const tmp = `${msgFile}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(msg, null, 2), "utf-8");
+  fs.renameSync(tmp, msgFile);
 
   return msg;
 }
@@ -1015,6 +1052,27 @@ export function sendMessageToAgent(
 // =============================================================================
 
 const WATCHER_DEBOUNCE_MS = 50;
+const POLL_INTERVAL_MS = 1500;
+
+function startPolling(
+  state: MessengerState,
+  dirs: Dirs,
+  deliverFn: (msg: AgentMailMessage) => void
+): void {
+  if (state.pollTimer) return;
+  const inbox = getMyInbox(state, dirs);
+  ensureDirSync(inbox);
+  state.pollTimer = setInterval(() => {
+    processAllPendingMessages(state, dirs, deliverFn);
+  }, POLL_INTERVAL_MS);
+}
+
+function stopPolling(state: MessengerState): void {
+  if (state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
 
 export function startWatcher(
   state: MessengerState,
@@ -1023,10 +1081,16 @@ export function startWatcher(
 ): void {
   if (!state.registered) return;
   if (state.watcher) return;
-  if (state.watcherRetries >= MAX_WATCHER_RETRIES) return;
+  if (state.watcherRetries >= MAX_WATCHER_RETRIES) {
+    // Fallback: polling mode (fs.watch can be unreliable on some FS setups)
+    startPolling(state, dirs, deliverFn);
+    return;
+  }
 
   const inbox = getMyInbox(state, dirs);
   ensureDirSync(inbox);
+  // If we had to fall back to polling earlier, stop it now.
+  stopPolling(state);
 
   processAllPendingMessages(state, dirs, deliverFn);
 
@@ -1038,7 +1102,11 @@ export function startWatcher(
         state.watcherRetryTimer = null;
         startWatcher(state, dirs, deliverFn);
       }, delay);
+      return;
     }
+
+    // Too many watcher failures. Switch to polling to avoid missing messages.
+    startPolling(state, dirs, deliverFn);
   }
 
   try {
@@ -1078,6 +1146,7 @@ export function stopWatcher(state: MessengerState): void {
     state.watcher.close();
     state.watcher = null;
   }
+  stopPolling(state);
 }
 
 // =============================================================================
@@ -1085,7 +1154,7 @@ export function stopWatcher(state: MessengerState): void {
 // =============================================================================
 
 export type TargetValidation =
-  | { valid: true }
+  | { valid: true; registration: AgentRegistration }
   | { valid: false; error: "invalid_name" | "not_found" | "not_active" | "invalid_registration" };
 
 export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
@@ -1100,17 +1169,24 @@ export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
 
   try {
     const reg: AgentRegistration = JSON.parse(fs.readFileSync(targetReg, "utf-8"));
+
+    if (!reg.sessionId || typeof reg.sessionId !== "string") {
+      return { valid: false, error: "invalid_registration" };
+    }
+
     if (!isProcessAlive(reg.pid)) {
       try {
         fs.unlinkSync(targetReg);
       } catch {
         // Ignore cleanup errors
       }
+      // Best-effort cleanup of inbox for dead sessions
+      safeRmDir(join(dirs.inbox, reg.sessionId));
       return { valid: false, error: "not_active" };
     }
+
+    return { valid: true, registration: reg };
   } catch {
     return { valid: false, error: "invalid_registration" };
   }
-
-  return { valid: true };
 }

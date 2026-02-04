@@ -14,6 +14,7 @@ import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
 import { discoverCrewAgents } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
+import { acquireLock } from "../utils/lock.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import * as store from "../store.js";
 
@@ -115,7 +116,22 @@ export async function execute(
   const cwd = ctx.cwd ?? process.cwd();
   const { prd } = params;
 
-  const existingPlan = store.getPlan(cwd);
+  const crewDir = store.getCrewDir(cwd);
+  const lock = await acquireLock(path.join(crewDir, "plan.lock"), {
+    retries: 50,
+    retryDelayMs: 100,
+    staleMs: 10 * 60_000,
+  });
+
+  if (!lock.acquired) {
+    return result(
+      `Planning already in progress (PID ${lock.holderPid ?? "unknown"}). Try again shortly.`,
+      { mode: "plan", error: "locked", holderPid: lock.holderPid }
+    );
+  }
+
+  try {
+    const existingPlan = store.getPlan(cwd);
   if (existingPlan) {
     return result(`A plan already exists for ${existingPlan.prd}.\n\nTo create a new plan, first delete the existing one:\n  - Delete .pi/messenger/crew/ directory\n  - Or reset tasks manually`, {
       mode: "plan",
@@ -319,6 +335,9 @@ ${taskList}
     plannerAgent: PLANNER_AGENT,
     tasksCreated: createdTasks.map(t => ({ id: t.id, title: t.title }))
   });
+  } finally {
+    lock.release();
+  }
 }
 
 // =============================================================================
